@@ -67,7 +67,7 @@ export function MermaidDiagram({ source }: Props) {
 
           const theme = getMermaidTheme(themeAttribute);
           if (initializedTheme !== theme) {
-            mermaid.initialize({ startOnLoad: false, theme });
+            mermaid.initialize({ securityLevel: "strict", startOnLoad: false, theme });
             initializedTheme = theme;
           }
 
