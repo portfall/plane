@@ -62,6 +62,7 @@ export class Server {
     // Logging middleware
     this.app.use(loggerMiddleware);
     // Body parsing middleware
+    this.app.use(`${env.LIVE_BASE_PATH}/admin/documents`, express.json({ limit: "2mb" }));
     this.app.use(express.json());
     this.app.use(express.urlencoded({ extended: true }));
     // cors middleware
