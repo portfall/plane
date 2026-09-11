@@ -5,6 +5,7 @@
  */
 
 .mermaid-diagram {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -13,6 +14,39 @@
   border-radius: 8px;
   background-color: var(--background-color-layer-3, transparent);
   overflow-x: auto;
+}
+
+.mermaid-code-source-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
+}
+
+.mermaid-diagram-open {
+  width: 100%;
+  padding: 24px 0 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: zoom-in;
+}
+
+.mermaid-diagram-open:focus-visible {
+  outline: 2px solid var(--border-color-accent-primary, currentColor);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+.mermaid-diagram-open:disabled {
+  cursor: default;
 }
 
 .mermaid-diagram-canvas {
@@ -24,6 +58,29 @@
 .mermaid-diagram-canvas svg {
   max-width: 100%;
   height: auto;
+  pointer-events: none;
+}
+
+.mermaid-diagram-viewer-stage {
+  overscroll-behavior: contain;
+}
+
+.mermaid-diagram-viewer-svg {
+  transform-origin: center;
+  transition: transform 150ms ease-out;
+}
+
+.mermaid-diagram-viewer-stage.cursor-grabbing .mermaid-diagram-viewer-svg {
+  transition: none;
+}
+
+.mermaid-diagram-viewer-svg svg {
+  display: block;
+  width: auto;
+  max-width: min(86vw, 1440px);
+  height: auto;
+  max-height: calc(100vh - 10rem);
+  pointer-events: none;
 }
 
 .mermaid-diagram-loading {
