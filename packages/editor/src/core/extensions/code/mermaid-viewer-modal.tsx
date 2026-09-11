@@ -176,7 +176,7 @@ export function MermaidViewerModal({ isOpen, onClose, svg }: Props) {
                 onContextMenu={() => setIsDragging(false)}
               >
                 <div
-                  className="mermaid-diagram-viewer-svg select-none"
+                  className="mermaid-diagram-viewer-svg size-full select-none"
                   style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom / 100})` }}
                   // Mermaid renders with securityLevel=strict; this is the same SVG already shown in the inline preview.
                   dangerouslySetInnerHTML={{ __html: svg }}

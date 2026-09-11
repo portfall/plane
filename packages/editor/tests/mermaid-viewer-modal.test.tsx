@@ -57,6 +57,15 @@ describe("MermaidViewerModal", () => {
     expect(document.body.textContent).toContain("100%");
   });
 
+  it("gives percentage-sized Mermaid SVGs a viewport-sized centering box", () => {
+    renderViewer();
+
+    const renderedSvg = document.querySelector<HTMLDivElement>(".mermaid-diagram-viewer-svg");
+
+    expect(renderedSvg).not.toBeNull();
+    expect(renderedSvg?.classList).toContain("size-full");
+  });
+
   it("pans an enlarged diagram and clears the offset on reset", () => {
     renderViewer();
 

@@ -114,6 +114,13 @@ export function MermaidDiagram({ canEdit, copied, isSourceVisible, onCopy, onTog
         ref={rootRef}
         className={cn("mermaid-diagram group/mermaid", { "mermaid-diagram-error": error })}
         data-mermaid-state={state}
+        contentEditable={false}
+        role="group"
+        aria-label="Mermaid diagram"
+        onMouseDown={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
       >
         <div className="shadow-sm absolute top-2 right-2 z-10 flex items-center gap-1 rounded-md border border-subtle bg-layer-1/90 p-1 opacity-100 backdrop-blur-sm transition-opacity duration-150 sm:opacity-0 sm:group-focus-within/mermaid:opacity-100 sm:group-hover/mermaid:opacity-100">
           <Tooltip tooltipContent={copied ? "Copied" : "Copy source"}>
@@ -170,20 +177,21 @@ export function MermaidDiagram({ canEdit, copied, isSourceVisible, onCopy, onTog
           </>
         )}
         {!error && isLoading && <div className="mermaid-diagram-loading">Rendering diagram…</div>}
-        <button
-          type="button"
-          className="mermaid-diagram-open"
-          onClick={() => setIsViewerOpen(true)}
-          disabled={!svg || !!error}
-          aria-label="Open Mermaid diagram in interactive viewer"
-          hidden={!!error || isViewerOpen}
-        >
-          <div
-            className="mermaid-diagram-canvas"
-            // Mermaid renders with securityLevel=strict before the SVG reaches this sink.
-            dangerouslySetInnerHTML={{ __html: svg }}
-          />
-        </button>
+        {!error && !isViewerOpen && (
+          <button
+            type="button"
+            className="mermaid-diagram-open"
+            onClick={() => setIsViewerOpen(true)}
+            disabled={!svg}
+            aria-label="Open Mermaid diagram in interactive viewer"
+          >
+            <div
+              className="mermaid-diagram-canvas"
+              // Mermaid renders with securityLevel=strict before the SVG reaches this sink.
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          </button>
+        )}
       </div>
       <MermaidViewerModal isOpen={isViewerOpen} onClose={() => setIsViewerOpen(false)} svg={svg} />
     </>

@@ -66,6 +66,9 @@
 }
 
 .mermaid-diagram-viewer-svg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transform-origin: center;
   transition: transform 150ms ease-out;
 }
@@ -76,9 +79,9 @@
 
 .mermaid-diagram-viewer-svg svg {
   display: block;
-  width: auto;
+  width: 100%;
   max-width: min(86vw, 1440px);
-  height: auto;
+  height: 100%;
   max-height: calc(100vh - 10rem);
   pointer-events: none;
 }
