@@ -17,6 +17,7 @@ import { registerController } from "@plane/decorators";
 import { logger, loggerMiddleware } from "@plane/logger";
 // controllers
 import { CONTROLLERS } from "@/controllers";
+import { pageContentMiddleware } from "@/controllers/page-content.controller";
 // env
 import { env } from "@/env";
 // hocuspocus server
@@ -62,7 +63,8 @@ export class Server {
     // Logging middleware
     this.app.use(loggerMiddleware);
     // Body parsing middleware
-    this.app.use(`${env.LIVE_BASE_PATH}/admin/documents`, express.json({ limit: "2mb" }));
+    const basePath = env.LIVE_BASE_PATH.replace(/\/+$/, "");
+    this.app.use(`${basePath}/admin/documents`, ...pageContentMiddleware);
     this.app.use(express.json());
     this.app.use(express.urlencoded({ extended: true }));
     // cors middleware

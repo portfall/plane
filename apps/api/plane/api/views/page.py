@@ -15,6 +15,7 @@ from plane.app.permissions import ROLE
 from plane.bgtasks.page_transaction_task import page_transaction
 from plane.db.models import Page, Project, ProjectMember
 from plane.utils.openapi import CURSOR_PARAMETER, PER_PAGE_PARAMETER, create_paginated_response
+from plane.utils import page_content
 
 from .base import BaseAPIView
 
@@ -136,7 +137,7 @@ class ProjectPageListCreateAPIEndpoint(ProjectPageBaseAPIEndpoint):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        with transaction.atomic():
+        with transaction.atomic(durable=True):
             page = serializer.save(created_by=request.user, updated_by=request.user)
             transaction.on_commit(
                 lambda: page_transaction.delay(
@@ -177,16 +178,22 @@ class ProjectPageDetailAPIEndpoint(ProjectPageBaseAPIEndpoint):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        previous_description_html = page.description_html
-        serializer = self.get_serializer(
-            page,
-            data=request.data,
-            partial=True,
-        )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        with transaction.atomic():
+        with transaction.atomic(durable=True):
+            # Lock the base table before rechecking project visibility and all
+            # mutable Page access/lock state. DISTINCT querysets cannot lock.
+            Page.objects.only("pk").select_for_update().get(pk=page_id)
+            self.check_permissions(request)
+            page = self.get_queryset().get(pk=page_id)
+            if page.is_locked:
+                return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
+            if page.access != request.data.get("access", page.access) and page.owned_by_id != request.user.id:
+                return Response(
+                    {"error": "Access cannot be updated since this page is owned by someone else"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            previous_description_html = page.description_html
+            serializer = self.get_serializer(page, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
             page = serializer.save(updated_by=request.user)
             if "description_html" in request.data and page.description_html != previous_description_html:
                 transaction.on_commit(
@@ -197,4 +204,11 @@ class ProjectPageDetailAPIEndpoint(ProjectPageBaseAPIEndpoint):
                     ),
                     robust=True,
                 )
+        try:
+            page_content.publish_saved(serializer)
+        except page_content.PageContentUnavailable:
+            return Response(
+                {"error": "Page content was committed, but live delivery is uncertain. Please reload before retrying."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         return Response(self.get_serializer(page).data, status=status.HTTP_200_OK)

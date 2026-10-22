@@ -5,10 +5,11 @@
 # Python imports
 import json
 from datetime import datetime
+from uuid import uuid4
 from django.core.serializers.json import DjangoJSONEncoder
 
 # Django imports
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import (
     Exists,
     OuterRef,
@@ -46,6 +47,7 @@ from plane.db.models import (
     UserRecentVisit,
 )
 from plane.utils.error_codes import ERROR_CODES
+from plane.utils import page_content
 
 # Local imports
 from ..base import BaseAPIView, BaseViewSet
@@ -130,6 +132,7 @@ class PageViewSet(BaseViewSet):
         serializer = PageSerializer(
             data=request.data,
             context={
+                "request": request,
                 "project_id": project_id,
                 "owned_by_id": request.user.id,
                 "description_json": request.data.get("description_json", {}),
@@ -153,46 +156,48 @@ class PageViewSet(BaseViewSet):
 
     def partial_update(self, request, slug, project_id, page_id):
         try:
-            page = Page.objects.get(
-                pk=page_id,
-                workspace__slug=slug,
-                projects__id=project_id,
-                project_pages__deleted_at__isnull=True,
-            )
-
-            if page.is_locked:
-                return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
-
-            parent = request.data.get("parent", None)
-            if parent:
-                _ = Page.objects.get(
-                    pk=parent,
+            with transaction.atomic(durable=True):
+                Page.objects.only("pk").select_for_update().get(pk=page_id)
+                self.check_permissions(request)
+                page = Page.objects.get(
+                    pk=page_id,
                     workspace__slug=slug,
                     projects__id=project_id,
                     project_pages__deleted_at__isnull=True,
                 )
 
-            # Only update access if the page owner is the requesting  user
-            if page.access != request.data.get("access", page.access) and page.owned_by_id != request.user.id:
-                return Response(
-                    {"error": "Access cannot be updated since this page is owned by someone else"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                if page.is_locked:
+                    return Response({"error": "Page is locked"}, status=status.HTTP_400_BAD_REQUEST)
 
-            serializer = PageDetailSerializer(page, data=request.data, partial=True)
-            page_description = page.description_html
-            if serializer.is_valid():
-                serializer.save()
-                # capture the page transaction
-                if request.data.get("description_html"):
-                    page_transaction.delay(
-                        new_description_html=request.data.get("description_html", "<p></p>"),
-                        old_description_html=page_description,
-                        page_id=page_id,
+                parent = request.data.get("parent", None)
+                if parent:
+                    Page.objects.get(
+                        pk=parent,
+                        workspace__slug=slug,
+                        projects__id=project_id,
+                        project_pages__deleted_at__isnull=True,
                     )
 
-                return Response(serializer.data, status=status.HTTP_200_OK)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                if page.access != request.data.get("access", page.access) and page.owned_by_id != request.user.id:
+                    return Response(
+                        {"error": "Access cannot be updated since this page is owned by someone else"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                serializer = PageDetailSerializer(page, data=request.data, partial=True, context={"request": request})
+                serializer.is_valid(raise_exception=True)
+                page_description = page.description_html
+                page = serializer.save()
+
+            page_content.publish_saved(serializer)
+            if page.description_html != page_description:
+                page_transaction.delay(
+                    new_description_html=page.description_html,
+                    old_description_html=page_description,
+                    page_id=page_id,
+                )
+
+            return Response(serializer.data, status=status.HTTP_200_OK)
         except Page.DoesNotExist:
             return Response(
                 {"error": "Access cannot be updated since this page is owned by someone else"},
@@ -252,7 +257,7 @@ class PageViewSet(BaseViewSet):
         )
 
         page.is_locked = True
-        page.save()
+        page.save(update_fields=["is_locked", "updated_at", "updated_by"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def unlock(self, request, slug, project_id, page_id):
@@ -264,7 +269,7 @@ class PageViewSet(BaseViewSet):
         )
 
         page.is_locked = False
-        page.save()
+        page.save(update_fields=["is_locked", "updated_at", "updated_by"])
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -285,7 +290,7 @@ class PageViewSet(BaseViewSet):
             )
 
         page.access = access
-        page.save()
+        page.save(update_fields=["access", "updated_at", "updated_by"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def list(self, request, slug, project_id):
@@ -365,8 +370,9 @@ class PageViewSet(BaseViewSet):
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @transaction.atomic
     def destroy(self, request, slug, project_id, page_id):
-        page = Page.objects.get(
+        page = Page.objects.select_for_update(of=("self",)).get(
             pk=page_id,
             workspace__slug=slug,
             projects__id=project_id,
@@ -499,20 +505,20 @@ class PagesDescriptionViewSet(BaseViewSet):
     permission_classes = [ProjectPagePermission]
 
     def retrieve(self, request, slug, project_id, page_id):
-        page = Page.objects.get(
-            Q(owned_by=self.request.user) | Q(access=0),
-            pk=page_id,
-            workspace__slug=slug,
-            projects__id=project_id,
-            project_pages__deleted_at__isnull=True,
-        )
-        binary_data = page.description_binary
+        with transaction.atomic():
+            page = Page.objects.select_for_update(of=("self",)).get(
+                Q(owned_by=self.request.user) | Q(access=0),
+                pk=page_id,
+                workspace__slug=slug,
+                projects__id=project_id,
+                project_pages__deleted_at__isnull=True,
+            )
+            self.check_permissions(request)
+            page_content.ensure_canonical(page)
+            binary_data = bytes(page.description_binary)
 
         def stream_data():
-            if binary_data:
-                yield binary_data
-            else:
-                yield b""
+            yield binary_data
 
         response = StreamingHttpResponse(stream_data(), content_type="application/octet-stream")
         response["Content-Disposition"] = 'attachment; filename="page_description.bin"'
@@ -545,21 +551,27 @@ class PagesDescriptionViewSet(BaseViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Store the old description_html before saving (needed for both tasks)
-        old_description_html = page.description_html
-
-        # Serialize the existing instance
-        existing_instance = json.dumps({"description_html": old_description_html}, cls=DjangoJSONEncoder)
-
-        # Use serializer for validation and update
-        serializer = PageBinaryUpdateSerializer(page, data=request.data, partial=True)
+        serializer = PageBinaryUpdateSerializer(page, data=request.data, partial=True, context={"request": request})
         if serializer.is_valid():
-            serializer.save()
+            with transaction.atomic():
+                Page.objects.only("pk").select_for_update().get(pk=page_id)
+                self.check_permissions(request)
+                page = Page.objects.get(
+                    Q(owned_by=request.user) | Q(access=0),
+                    pk=page_id,
+                    workspace__slug=slug,
+                    project_pages__project_id=project_id,
+                    project_pages__deleted_at__isnull=True,
+                )
+                serializer.instance = page
+                page = serializer.save()
+                old_description_html = serializer.previous_description_html
+                existing_instance = json.dumps({"description_html": old_description_html}, cls=DjangoJSONEncoder)
 
             # Capture the page transaction
-            if request.data.get("description_html"):
+            if page.description_html != old_description_html:
                 page_transaction.delay(
-                    new_description_html=request.data.get("description_html", "<p></p>"),
+                    new_description_html=page.description_html,
                     old_description_html=old_description_html,
                     page_id=page_id,
                 )
@@ -578,51 +590,72 @@ class PagesDescriptionViewSet(BaseViewSet):
 class PageDuplicateEndpoint(BaseAPIView):
     permission_classes = [ProjectPagePermission]
 
+    @transaction.atomic
     def post(self, request, slug, project_id, page_id):
-        page = Page.objects.get(
+        page = Page.objects.select_for_update(of=("self",)).get(
             pk=page_id,
             workspace__slug=slug,
             projects__id=project_id,
             project_pages__deleted_at__isnull=True,
         )
+        self.check_permissions(request)
 
         # check for permission
         if page.access == Page.PRIVATE_ACCESS and page.owned_by_id != request.user.id:
             return Response({"error": "Permission denied"}, status=status.HTTP_403_FORBIDDEN)
 
         # get all the project ids where page is present
-        project_ids = ProjectPage.objects.filter(page_id=page_id).values_list("project_id", flat=True)
+        project_ids = list(ProjectPage.objects.filter(page_id=page_id).values_list("project_id", flat=True))
 
-        page.pk = None
-        page.name = f"{page.name} (Copy)"
-        page.description_binary = None
+        clone_id = uuid4()
+        clone_name = f"{page.name} (Copy)"
+        content = page_content.prepare_pat(
+            clone_id,
+            persisted_binary=page.description_binary,
+            previous_html=page.description_html,
+            title=clone_name,
+            replacement_html=None,
+            replace_title=True,
+        )
+        page_content.retain_unchanged_html(page, content)
+        page.pk = clone_id
+        page._state.adding = True
+        page.name = clone_name
+        for field, value in content.items():
+            setattr(page, field, value)
         page.owned_by = request.user
         page.created_by = request.user
         page.updated_by = request.user
-        page.save()
+        page.save(force_insert=True)
 
-        for project_id in project_ids:
+        for linked_project_id in project_ids:
             ProjectPage.objects.create(
                 workspace_id=page.workspace_id,
-                project_id=project_id,
+                project_id=linked_project_id,
                 page_id=page.id,
                 created_by_id=page.created_by_id,
                 updated_by_id=page.updated_by_id,
             )
 
-        page_transaction.delay(
-            new_description_html=page.description_html,
-            old_description_html=None,
-            page_id=page.id,
+        transaction.on_commit(
+            lambda: page_transaction.delay(
+                new_description_html=page.description_html,
+                old_description_html=None,
+                page_id=clone_id,
+            ),
+            robust=True,
         )
 
         # Copy the s3 objects uploaded in the page
-        copy_s3_objects_of_description_and_assets.delay(
-            entity_name="PAGE",
-            entity_identifier=page.id,
-            project_id=project_id,
-            slug=slug,
-            user_id=request.user.id,
+        transaction.on_commit(
+            lambda: copy_s3_objects_of_description_and_assets.delay(
+                entity_name="PAGE",
+                entity_identifier=clone_id,
+                project_id=project_id,
+                slug=slug,
+                user_id=request.user.id,
+            ),
+            robust=True,
         )
 
         page = (

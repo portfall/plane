@@ -11,6 +11,7 @@ import { loggerConfig } from "./config";
 
 export const loggerMiddleware: RequestHandler = expressWinston.logger({
   ...loggerConfig,
+  requestWhitelist: ["url", "method", "httpVersion", "originalUrl", "query"],
   transports: [new transports.Console()],
   msg: "{{req.method}} {{req.url}} {{res.statusCode}} {{res.responseTime}}ms",
   expressFormat: true,

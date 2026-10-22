@@ -5,13 +5,14 @@
 # Third party imports
 from rest_framework import serializers
 import base64
+from uuid import uuid4
+from django.db import transaction
+from rest_framework.exceptions import PermissionDenied
 
 # Module imports
 from .base import BaseSerializer
-from plane.utils.content_validator import (
-    validate_binary_data,
-    validate_html_content,
-)
+from plane.utils import page_content
+from plane.utils.content_validator import validate_html_content
 from plane.db.models import (
     Page,
     PageLabel,
@@ -58,23 +59,38 @@ class PageSerializer(BaseSerializer):
         ]
         read_only_fields = ["workspace", "owned_by"]
 
+    @transaction.atomic
     def create(self, validated_data):
         labels = validated_data.pop("labels", None)
         project_id = self.context["project_id"]
         owned_by_id = self.context["owned_by_id"]
-        description_json = self.context["description_json"]
         description_binary = self.context["description_binary"]
         description_html = self.context["description_html"]
 
         # Get the workspace id from the project
         project = Project.objects.get(pk=project_id)
 
-        # Create the page
+        page_id = uuid4()
+        if description_binary:
+            incoming = PageBinaryUpdateSerializer(data={"description_binary": description_binary})
+            incoming.is_valid(raise_exception=True)
+            content = page_content.merge_snapshot(page_id, b"", incoming.validated_data["description_binary"])
+        else:
+            content = page_content.prepare_pat(
+                page_id,
+                persisted_binary=b"",
+                previous_html=description_html,
+                title=validated_data.get("name", ""),
+                replacement_html=description_html,
+                replace_title=False,
+            )
+        if self.context.get("preserve_exact_html"):
+            content["description_html"] = description_html
+
         page = Page.objects.create(
+            id=page_id,
             **validated_data,
-            description_json=description_json,
-            description_binary=description_binary,
-            description_html=description_html,
+            **content,
             owned_by_id=owned_by_id,
             workspace_id=project.workspace_id,
         )
@@ -105,7 +121,44 @@ class PageSerializer(BaseSerializer):
             )
         return page
 
+    @transaction.atomic
     def update(self, instance, validated_data):
+        instance = Page.objects.select_for_update().get(pk=instance.pk)
+        request = self.context.get("request")
+        if request:
+            if instance.access == Page.PRIVATE_ACCESS and instance.owned_by_id != request.user.id:
+                raise PermissionDenied()
+            if "access" in validated_data and instance.access != validated_data["access"]:
+                if instance.owned_by_id != request.user.id:
+                    raise serializers.ValidationError(
+                        "Access cannot be updated since this page is owned by someone else"
+                    )
+        if instance.is_locked:
+            raise serializers.ValidationError("Page is locked")
+
+        self.content_needs_publish = False
+        body_replacement = "description_html" in validated_data
+        title_replacement = "name" in validated_data and (
+            self.context.get("authoritative_title") or validated_data["name"] != instance.name
+        )
+        if body_replacement or title_replacement:
+            replacement = validated_data.get("description_html")
+            content = page_content.prepare_pat(
+                instance.pk,
+                persisted_binary=instance.description_binary,
+                previous_html=instance.description_html,
+                title=validated_data.get("name", instance.name),
+                replacement_html=replacement,
+                replace_title="name" in validated_data if body_replacement else title_replacement,
+                preserve_loaded_title=not body_replacement and not self.context.get("authoritative_title", False),
+            )
+            if not body_replacement:
+                page_content.retain_unchanged_html(instance, content)
+            elif self.context.get("preserve_exact_html"):
+                content["description_html"] = replacement
+            validated_data.update(content)
+            self.content_needs_publish = True
+
         labels = validated_data.pop("labels", None)
         if labels is not None:
             PageLabel.objects.filter(page=instance).delete()
@@ -123,11 +176,27 @@ class PageSerializer(BaseSerializer):
                 batch_size=10,
             )
 
-        return super().update(instance, validated_data)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        fields = {
+            field.name
+            for field in instance._meta.concrete_fields
+            if field.name in validated_data or field.attname in validated_data
+        } | {"updated_at", "updated_by"}
+        if "description_html" in fields:
+            fields.add("description_stripped")
+        instance.save(update_fields=fields)
+        return instance
 
 
 class PageDetailSerializer(PageSerializer):
-    description_html = serializers.CharField()
+    description_html = serializers.CharField(allow_blank=True, trim_whitespace=False)
+
+    def validate_description_html(self, value):
+        valid, error, sanitized = validate_html_content(value)
+        if not valid:
+            raise serializers.ValidationError(error)
+        return sanitized if sanitized is not None else value
 
     class Meta(PageSerializer.Meta):
         fields = PageSerializer.Meta.fields + ["description_html"]
@@ -173,9 +242,18 @@ class PageVersionDetailSerializer(BaseSerializer):
 class PageBinaryUpdateSerializer(serializers.Serializer):
     """Serializer for updating page binary description with validation"""
 
-    description_binary = serializers.CharField(required=False, allow_blank=True)
-    description_html = serializers.CharField(required=False, allow_blank=True)
-    description_json = serializers.JSONField(required=False, allow_null=True)
+    description_binary = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        max_length=((page_content.MAX_CONTENT_BYTES + 2) // 3) * 4,
+    )
+    description_html = serializers.CharField(read_only=True)
+    description_json = serializers.JSONField(read_only=True)
+
+    def validate(self, attrs):
+        if not attrs.get("description_binary"):
+            raise serializers.ValidationError({"description_binary": "A non-empty document snapshot is required."})
+        return attrs
 
     def validate_description_binary(self, value):
         """Validate the base64-encoded binary data"""
@@ -184,12 +262,12 @@ class PageBinaryUpdateSerializer(serializers.Serializer):
 
         try:
             # Decode the base64 data
-            binary_data = base64.b64decode(value)
+            binary_data = base64.b64decode(value, validate=True)
 
-            # Validate the binary data
-            is_valid, error_message = validate_binary_data(binary_data)
-            if not is_valid:
-                raise serializers.ValidationError(f"Invalid binary data: {error_message}")
+            # Live validates actual Yjs structure. Text-pattern heuristics
+            # reject valid documents containing code or URLs.
+            if len(binary_data) > page_content.MAX_CONTENT_BYTES:
+                raise serializers.ValidationError("Document exceeds the maximum size.")
 
             return binary_data
         except Exception as e:
@@ -197,29 +275,20 @@ class PageBinaryUpdateSerializer(serializers.Serializer):
                 raise
             raise serializers.ValidationError("Failed to decode base64 data")
 
-    def validate_description_html(self, value):
-        """Validate the HTML content"""
-        if not value:
-            return value
-
-        # Use the validation function from utils
-        is_valid, error_message, sanitized_html = validate_html_content(value)
-        if not is_valid:
-            raise serializers.ValidationError(error_message)
-
-        # Return sanitized HTML if available, otherwise return original
-        return sanitized_html if sanitized_html is not None else value
-
+    @transaction.atomic
     def update(self, instance, validated_data):
-        """Update the page instance with validated data"""
-        if "description_binary" in validated_data:
-            instance.description_binary = validated_data.get("description_binary")
-
-        if "description_html" in validated_data:
-            instance.description_html = validated_data.get("description_html")
-
-        if "description_json" in validated_data:
-            instance.description_json = validated_data.get("description_json")
-
-        instance.save()
+        instance = Page.objects.select_for_update().get(pk=instance.pk)
+        if instance.is_locked or instance.archived_at:
+            raise serializers.ValidationError("Page is locked or archived")
+        request = self.context.get("request")
+        if request and instance.access == Page.PRIVATE_ACCESS and instance.owned_by_id != request.user.id:
+            raise PermissionDenied()
+        self.previous_description_html = instance.description_html
+        content = page_content.merge_snapshot(
+            instance.pk, instance.description_binary, validated_data["description_binary"]
+        )
+        page_content.retain_unchanged_html(instance, content)
+        for field, value in content.items():
+            setattr(instance, field, value)
+        instance.save(update_fields=[*page_content.CONTENT_FIELDS, "description_stripped", "updated_at", "updated_by"])
         return instance

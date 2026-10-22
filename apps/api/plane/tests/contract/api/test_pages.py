@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
+import base64
 from uuid import uuid4
 
 import pytest
@@ -126,6 +127,26 @@ def _issue_links_url(workspace, project, issue):
 @pytest.mark.contract
 class TestProjectPageAPI:
     @pytest.mark.django_db
+    def test_body_patch_keeps_a_canonical_collaborative_document(self, api_key_client, workspace, project, create_user):
+        page = _create_page(workspace, project, create_user, html="<p>original body</p>")
+        # Real Yjs state with client 42 and a paragraph, not arbitrary bytes.
+        page.description_binary = base64.b64decode(
+            "AQMqAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAKgAGBAAqAQ1vcmlnaW5hbCBib2R5AA=="
+        )
+        page.save()
+
+        response = api_key_client.patch(
+            _detail_url(workspace, project, page),
+            {"description_html": "<p>replacement body</p>"},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_200_OK, response.data
+        page.refresh_from_db()
+        assert page.description_binary, "PAT replacement discarded the canonical Yjs history"
+        assert page.description_html == "<p>replacement body</p>"
+
+    @pytest.mark.django_db
     def test_create_get_update_preserves_exact_content(self, api_key_client, workspace, project, create_user):
         create_response = api_key_client.post(
             _list_url(workspace, project),
@@ -140,15 +161,16 @@ class TestProjectPageAPI:
 
         assert create_response.status_code == status.HTTP_201_CREATED
         assert create_response.data["description_html"] == EXACT_PAGE_HTML
-        assert create_response.data["description_json"] == {}
+        assert create_response.data["description_json"]["type"] == "doc"
         page = Page.objects.get(pk=create_response.data["id"])
         assert page.description_html == EXACT_PAGE_HTML
+        assert page.description_binary
         assert page.owned_by_id == create_user.id
 
         get_response = api_key_client.get(_detail_url(workspace, project, page))
         assert get_response.status_code == status.HTTP_200_OK
         assert get_response.data["description_html"] == EXACT_PAGE_HTML
-        assert get_response.data["description_json"] == {}
+        assert get_response.data["description_json"] == create_response.data["description_json"]
 
         update_response = api_key_client.patch(
             _detail_url(workspace, project, page),
@@ -368,10 +390,12 @@ class TestProjectPageAPI:
         assert "<script" not in stored_html
 
     @pytest.mark.django_db
-    def test_html_update_invalidates_stale_live_editor_state(self, api_key_client, workspace, project, create_user):
-        page = _create_page(workspace, project, create_user, html="<p>old</p>")
+    def test_html_update_retains_canonical_live_editor_history(self, api_key_client, workspace, project, create_user):
+        page = _create_page(workspace, project, create_user, html="<p>original body</p>")
         Page.objects.filter(pk=page.id).update(
-            description_binary=b"stale-yjs-state",
+            # Valid Yjs paragraph from client 42. Semantic replay/tombstone
+            # behavior is exercised by Live's real Yjs tests.
+            description_binary=base64.b64decode("AQMqAAcBB2RlZmF1bHQDCXBhcmFncmFwaAcAKgAGBAAqAQ1vcmlnaW5hbCBib2R5AA=="),
             description_json={"type": "doc", "content": [{"type": "paragraph"}]},
         )
 
@@ -384,8 +408,8 @@ class TestProjectPageAPI:
         assert response.status_code == status.HTTP_200_OK, response.data
         page.refresh_from_db()
         assert page.description_html == "<p>agent update</p>"
-        assert page.description_binary is None
-        assert page.description_json == {}
+        assert page.description_binary
+        assert page.description_json["type"] == "doc"
 
     @pytest.mark.django_db
     def test_page_lifecycle_fields_are_not_mass_assignable(self, api_key_client, workspace, project, create_user):

@@ -102,13 +102,10 @@ class PageAPISerializer(PageSerializer):
         self.context["description_html"] = validated_data.pop("description_html")
         self.context["description_json"] = {}
         self.context["description_binary"] = None
+        self.context["preserve_exact_html"] = True
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        if "description_html" in validated_data:
-            # Plane Live treats a non-empty Yjs binary as authoritative. Clear
-            # it so the next editor connection imports this PAT-authored HTML
-            # instead of restoring and later persisting stale editor state.
-            validated_data["description_binary"] = None
-            validated_data["description_json"] = {}
+        self.context["preserve_exact_html"] = True
+        self.context["authoritative_title"] = True
         return super().update(instance, validated_data)
