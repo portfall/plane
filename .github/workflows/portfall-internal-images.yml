@@ -1,0 +1,70 @@
+name: Portfall internal Plane images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["portfall-internal-*"]
+  pull_request:
+    paths:
+      - ".github/workflows/portfall-internal-images.yml"
+      - "deployments/portfall/**"
+      - "apps/api/**"
+      - "apps/live/**"
+      - "apps/web/**"
+      - "apps/admin/**"
+      - "apps/space/**"
+      - "packages/**"
+      - "patches/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfall-internal-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-images:
+    if: github.repository == 'portfall/plane'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Build and test native x86 images without publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          plane_build_tmp=$(mktemp -d)
+          trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_build_tmp"' EXIT
+          export DOCKER_CONFIG="$plane_build_tmp/docker"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '{}' > "$DOCKER_CONFIG/config.json"
+          for target in live space web admin; do
+            docker build --platform linux/amd64 --target "$target" \
+              -f deployments/portfall/Dockerfile.node -t "local/plane-$target:ci" .
+          done
+          docker build --platform linux/amd64 --target build \
+            -f deployments/portfall/Dockerfile.node -t local/plane-node-build:ci .
+          docker run --rm --network none --memory 3g --pids-limit 256 \
+            --env API_BASE_URL=http://api.invalid --env LIVE_SERVER_SECRET_KEY=synthetic-ci-only \
+            --entrypoint sh local/plane-node-build:ci -c \
+            'pnpm --filter live test && pnpm --filter @plane/editor test && node --test deployments/portfall/verify-deploy.test.mjs'
+          docker build --platform linux/amd64 -f deployments/portfall/Dockerfile.api \
+            -t local/plane-api:ci .
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --ulimit core=0 --memory 512m --pids-limit 128 \
+            --tmpfs /tmp:rw,size=64m --entrypoint node local/plane-live:ci --input-type=module -e \
+            'import sharp from "sharp"; if(process.arch!=="x64") throw Error("wrong architecture"); const b=await sharp({create:{width:8,height:8,channels:4,background:"#fff"}}).resize(4,4).png().toBuffer(); const m=await sharp(b).metadata(); if(m.width!==4) throw Error("native image conversion failed"); console.log(JSON.stringify({node:process.version,arch:process.arch,sharp:sharp.versions.sharp,libvips:sharp.versions.vips,uid:process.getuid()}))'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --ulimit core=0 --memory 1g --pids-limit 128 \
+            --tmpfs /tmp:rw,size=128m --tmpfs /code/plane/logs:rw,uid=10001,gid=10001,mode=0700 \
+            --env DJANGO_SETTINGS_MODULE=plane.settings.project_bundle \
+            --env SECRET_KEY=synthetic-ci-only --env REDIS_URL=redis://127.0.0.1:6379/0 \
+            --env DATABASE_URL=postgresql://synthetic:synthetic@127.0.0.1:5432/synthetic \
+            --entrypoint sh local/plane-api:ci -c \
+            'python -m pip check && python manage.py export_project_bundle --help && python manage.py import_project_bundle --help && node --version && sha256sum /code/project-bundle-codec.mjs'

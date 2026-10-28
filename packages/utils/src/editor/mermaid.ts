@@ -9,6 +9,26 @@
  */
 export const MERMAID_LANGUAGE = "mermaid";
 
+export const MERMAID_MIN_ZOOM = 50;
+export const MERMAID_MAX_ZOOM = 300;
+const MERMAID_ZOOM_STEP = 25;
+
+export type TMermaidZoomDirection = "increase" | "decrease";
+
+/**
+ * @description constrain a Mermaid diagram zoom percentage to the viewer range
+ * @param {number} zoom
+ */
+export const clampMermaidZoom = (zoom: number): number => Math.min(Math.max(zoom, MERMAID_MIN_ZOOM), MERMAID_MAX_ZOOM);
+
+/**
+ * @description move a Mermaid diagram zoom percentage by one toolbar step
+ * @param {number} zoom
+ * @param {TMermaidZoomDirection} direction
+ */
+export const getNextMermaidZoom = (zoom: number, direction: TMermaidZoomDirection): number =>
+  clampMermaidZoom(zoom + (direction === "increase" ? MERMAID_ZOOM_STEP : -MERMAID_ZOOM_STEP));
+
 /**
  * @description check if a code block language attribute refers to a Mermaid diagram
  * @param {unknown} language
