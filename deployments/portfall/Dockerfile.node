@@ -38,6 +38,8 @@ CMD ["node", "dist/start.mjs"]
 
 FROM node-runtime AS space
 COPY --from=space-deploy /out/space /app
+COPY --from=build /src/apps/space/build /app/build
+RUN test -f /app/build/server/index.js
 COPY --from=space-deploy /out/space-packages.json /usr/share/plane-build/packages.json
 COPY pnpm-lock.yaml pnpm-workspace.yaml /usr/share/plane-build/
 CMD ["node", "node_modules/@react-router/serve/dist/cli.js", "build/server/index.js"]

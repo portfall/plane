@@ -56,6 +56,9 @@ metadata loader cannot fetch a relative API URL from Node. Published-page client
 requests still use the same-origin API; server-side metadata needs separate
 internal-URL design and verification before claiming that feature works.
 
+Space’s ignored `build` directory is copied explicitly from the build stage;
+legacy pnpm deployment does not include that runtime entrypoint.
+
 Live and Space run the actual compiled entrypoints as UID/GID 1000, without npm,
 npx or Corepack in their runtime stage. Their production dependency directories
 come from offline pnpm 11 legacy deployment. That operation can re-resolve peer

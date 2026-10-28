@@ -61,6 +61,10 @@ jobs:
             --tmpfs /tmp:rw,size=64m --entrypoint node local/plane-live:ci --input-type=module -e \
             'import sharp from "sharp"; if(process.arch!=="x64") throw Error("wrong architecture"); const b=await sharp({create:{width:8,height:8,channels:4,background:"#fff"}}).resize(4,4).png().toBuffer(); const m=await sharp(b).metadata(); if(m.width!==4) throw Error("native image conversion failed"); console.log(JSON.stringify({node:process.version,arch:process.arch,sharp:sharp.versions.sharp,libvips:sharp.versions.vips,uid:process.getuid()}))'
           docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --ulimit core=0 --memory 256m --pids-limit 128 \
+            --entrypoint node local/plane-space:ci -e \
+            'if(!require("node:fs").existsSync("/app/build/server/index.js")) throw Error("Space runtime entrypoint missing")'
+          docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --ulimit core=0 --memory 1g --pids-limit 128 \
             --tmpfs /tmp:rw,size=128m --tmpfs /code/plane/logs:rw,uid=10001,gid=10001,mode=0700 \
             --env DJANGO_SETTINGS_MODULE=plane.settings.project_bundle \
