@@ -9,7 +9,11 @@ ENV CI=1 HUSKY=0 TURBO_TELEMETRY_DISABLED=1 \
 COPY . .
 RUN corepack enable \
     && pnpm install --frozen-lockfile --ignore-scripts \
-    && pnpm exec turbo run build --filter=live... --filter=web --filter=admin --filter=space --concurrency=2
+    && pnpm exec turbo run build --filter=live... --filter=web --filter=admin --filter=space --concurrency=2 \
+    && node --test deployments/portfall/test-generate-node-notices.mjs
+RUN --network=none for app in live space web admin; do \
+      node deployments/portfall/generate-node-notices.mjs /src "$app" "/notices/$app" || exit 1; \
+    done
 
 FROM build AS live-deploy
 RUN pnpm --filter live --prod deploy --legacy --offline --ignore-scripts /out/live \
@@ -32,6 +36,7 @@ EXPOSE 3000
 
 FROM node-runtime AS live
 COPY --from=live-deploy /out/live /app
+COPY --from=build /notices/live/ /usr/share/plane-build/
 COPY --from=live-deploy /out/live-packages.json /usr/share/plane-build/packages.json
 COPY pnpm-lock.yaml pnpm-workspace.yaml /usr/share/plane-build/
 CMD ["node", "dist/start.mjs"]
@@ -39,6 +44,8 @@ CMD ["node", "dist/start.mjs"]
 FROM node-runtime AS space
 COPY --from=space-deploy /out/space /app
 COPY --from=build /src/apps/space/build /app/build
+COPY --from=build /notices/space/ /usr/share/plane-build/
+COPY --from=build /notices/space/THIRD_PARTY_NOTICES /app/build/client/THIRD_PARTY_NOTICES
 RUN test -f /app/build/server/index.js
 COPY --from=space-deploy /out/space-packages.json /usr/share/plane-build/packages.json
 COPY pnpm-lock.yaml pnpm-workspace.yaml /usr/share/plane-build/
@@ -53,9 +60,13 @@ ENTRYPOINT ["nginx", "-g", "daemon off;"]
 
 FROM static-runtime AS web
 COPY --from=build /src/apps/web/build/client /usr/share/nginx/html
+COPY --from=build /notices/web/ /usr/share/plane-build/
+COPY --from=build /notices/web/THIRD_PARTY_NOTICES /usr/share/nginx/html/THIRD_PARTY_NOTICES
 
 FROM static-runtime AS admin
 COPY --from=build /src/apps/admin/build/client /usr/share/nginx/html/god-mode
+COPY --from=build /notices/admin/ /usr/share/plane-build/
+COPY --from=build /notices/admin/THIRD_PARTY_NOTICES /usr/share/nginx/html/god-mode/THIRD_PARTY_NOTICES
 RUN test -f /usr/share/nginx/html/god-mode/index.html
 USER 0
 RUN sed -i 's@/index.html;@/god-mode/index.html;@' /etc/nginx/nginx.conf

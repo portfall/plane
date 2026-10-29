@@ -53,7 +53,7 @@ jobs:
           docker run --rm --network none --memory 3g --pids-limit 256 \
             --env API_BASE_URL=http://api.invalid --env LIVE_SERVER_SECRET_KEY=synthetic-ci-only \
             --entrypoint sh local/plane-node-build:ci -c \
-            'pnpm --filter live test && pnpm --filter @plane/editor test && node --test deployments/portfall/verify-deploy.test.mjs'
+            'pnpm --filter live test && pnpm --filter @plane/editor test && node --test deployments/portfall/verify-deploy.test.mjs deployments/portfall/test-generate-node-notices.mjs'
           docker build --platform linux/amd64 -f deployments/portfall/Dockerfile.api \
             -t local/plane-api:ci .
           docker run --rm --network none --read-only --cap-drop ALL \
@@ -97,6 +97,31 @@ jobs:
             test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
             image_id=$(docker image inspect --format '{{.Id}}' "$image")
             docker image inspect "$image" > "$plane_inventory/$role-image.json"
+            for notice_file in THIRD_PARTY_NOTICES node-notices.json; do
+              docker run --rm --network none --read-only --cap-drop ALL \
+                --security-opt no-new-privileges --entrypoint cat "$image" \
+                "/usr/share/plane-build/$notice_file" > "$plane_inventory/$role-$notice_file"
+              test -s "$plane_inventory/$role-$notice_file"
+            done
+            case "$role" in
+              api|live|space)
+                docker run --rm --network none --read-only --cap-drop ALL \
+                  --security-opt no-new-privileges --entrypoint cat "$image" \
+                  /usr/share/plane-build/NODE_LICENSE > "$plane_inventory/$role-NODE_LICENSE"
+                test -s "$plane_inventory/$role-NODE_LICENSE" ;;
+            esac
+            case "$role" in
+              web) public_notice=/usr/share/nginx/html/THIRD_PARTY_NOTICES ;;
+              admin) public_notice=/usr/share/nginx/html/god-mode/THIRD_PARTY_NOTICES ;;
+              space) public_notice=/app/build/client/THIRD_PARTY_NOTICES ;;
+              *) public_notice= ;;
+            esac
+            if test -n "$public_notice"; then
+              docker run --rm --network none --read-only --cap-drop ALL \
+                --security-opt no-new-privileges --entrypoint cat "$image" \
+                "$public_notice" > "$plane_scan_tmp/public-notice"
+              cmp "$plane_scan_tmp/public-notice" "$plane_inventory/$role-THIRD_PARTY_NOTICES"
+            fi
             docker image save --output "$plane_scan_tmp/image.tar" "$image"
             env -i PATH="$PATH" HOME="$plane_scan_tmp/home" XDG_CACHE_HOME="$plane_scan_tmp/cache" \
               DOCKER_CONFIG="$plane_scan_tmp/docker" GOMEMLIMIT=2GiB GOMAXPROCS=2 \
@@ -117,13 +142,28 @@ jobs:
               assert cdx['bomFormat'] == 'CycloneDX' and cdx['components']
               assert native['artifacts']
               assert native['descriptor']['configuration']['licenses']['include-content'] == 'all'
+              notices = (root / f'{role}-THIRD_PARTY_NOTICES').read_bytes()
+              manifest = json.loads((root / f'{role}-node-notices.json').read_text())
+              assert manifest['scope'] == ('@plane/editor' if role == 'api' else role)
+              assert manifest['license_approved'] is False
+              assert manifest['packages'] and any(p['name'] == 'plane' for p in manifest['packages'])
+              assert hashlib.sha256(notices).hexdigest() == manifest['notices_sha256']
+              assert b'GNU AFFERO GENERAL PUBLIC LICENSE' in notices
+              for package in manifest['packages']:
+                  assert package['version'] and package['package_json_sha256']
+                  assert package['files'] or any(gap['package'] == f"{package['name']}@{package['version']}" for gap in manifest['qualified_gaps'])
+              if role in ['api', 'live', 'space']:
+                  node_license = (root / f'{role}-NODE_LICENSE').read_bytes()
+                  assert manifest['node']['version'] == 'v22.23.4'
+                  assert hashlib.sha256(node_license).hexdigest() == manifest['node']['sha256']
+                  assert node_license in notices
           files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
           (root / 'collection.json').write_text(json.dumps({
               'source_commit': sys.argv[2], 'platform': 'linux/amd64',
               'scanner_version': '1.55.0', 'files': files,
               'registry_publication': False, 'license_approved': False,
               'source_fulfillment_complete': False,
-              'scope': 'Actual local image config identities; not registry manifest subjects or complete browser-bundle/codec attribution'
+              'scope': 'Actual local image config identities and conservative production-closure JS/codec notice bundles with qualified source-evidence gaps; not registry manifest subjects or license/source clearance'
           }, indent=2) + '\n')
           PYRECEIPT
       - name: Retain metadata inventories for operator review

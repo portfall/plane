@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "license_approved": false,
+  "packages": {
+    "@hocuspocus/provider@2.15.2": {
+      "name": "@hocuspocus/provider",
+      "version": "2.15.2",
+      "gitHead": "cd788b6a315f608ef531524409abdce1e6790726",
+      "package_json_sha256": "691eccaa5fcc9079de19f706f230a95baa2e4307693910d9e9eacb4d52849c31",
+      "file": "notice-data/hocuspocus-provider-2.15.2-LICENSE",
+      "sha256": "db393bb93f624cb322cf8e7db1607d8cebfb325af6acfa75eae6c7f1ad04d2cf",
+      "bytes": 1072,
+      "source": "https://raw.githubusercontent.com/ueberdosis/hocuspocus/cd788b6a315f608ef531524409abdce1e6790726/LICENSE.md",
+      "registry_metadata": {
+        "source": "https://registry.npmjs.org/@hocuspocus/provider/2.15.2",
+        "sha256": "57d79208331529d2bfbbe10b2eb579b32fdb72a8f8ed83cee0d586f6953269cb",
+        "gitHead": "cd788b6a315f608ef531524409abdce1e6790726",
+        "dist_integrity": "sha512-mdBurviyaUd7bQx4vMIE39WqRJDTpfFelHOVXr7w/jA8G1E7K7lxQ9/DacSrbg+9o8s+1z1+SerZiUjaToaBJg=="
+      }
+    },
+    "@tiptap/extension-emoji@2.27.3": {
+      "name": "@tiptap/extension-emoji",
+      "version": "2.27.3",
+      "gitHead": "0ed4a30a6cda23799a01881f67d01ad218a2ac6d",
+      "package_json_sha256": "c926b24a5b008b03563f67390552de91857297c17974400c653d8931b5a85203",
+      "file": "notice-data/tiptap-extension-emoji-2.27.3-LICENSE",
+      "sha256": "c96e5ecb55ac593157ad1d21d1f44a611187f494a0f04c235a1ae692c88d6ba9",
+      "bytes": 1069,
+      "source": "https://raw.githubusercontent.com/ueberdosis/tiptap/0ed4a30a6cda23799a01881f67d01ad218a2ac6d/LICENSE.md",
+      "registry_metadata": {
+        "source": "https://registry.npmjs.org/@tiptap/extension-emoji/2.27.3",
+        "sha256": "3b9f86940685a515d5c7881e762e069e72d72aca45abe0b3157d963ac518062d",
+        "gitHead": "0ed4a30a6cda23799a01881f67d01ad218a2ac6d",
+        "dist_integrity": "sha512-fPZK05GfDSheb4JiiScScy6PNqvy2rz1G605uVGkrAkNoL28fHLl2qrGq5w6feJv54HgaOrP+Ilto6/lXG7nKA=="
+      }
+    },
+    "client-only@0.0.1": {
+      "name": "client-only",
+      "version": "0.0.1",
+      "package_json_sha256": "4d6342705767832f299b9a59c28e4275bcf02db19472732f93f67d979441df8f",
+      "source": "https://registry.npmjs.org/client-only/0.0.1",
+      "reason": "UNRESOLVED: the original client-only@0.0.1 npm archive declares MIT in package.json but includes no standalone license text, copyright notice, README, repository or gitHead. Metadata-only evidence does not establish complete attribution or license clearance; no holder or substitute text has been invented.",
+      "registry_metadata": {
+        "source": "https://registry.npmjs.org/client-only/0.0.1",
+        "sha256": "8acb6bcedb32e69c38d9d6377e521ee757beb95161b7a6258fa38bf867b9588a",
+        "declared_license": "MIT",
+        "dist_integrity": "sha512-IV3Ou0jSMzZrd3pZ48nLkT9DA7Ag1pnPzaiQhpW7c3RbcqqzvzzVu+L8gfqMp/8IM2MQtSiqaCxrrcfu8I8rMA=="
+      }
+    },
+    "@hocuspocus/extension-logger@2.15.2": {
+      "name": "@hocuspocus/extension-logger",
+      "version": "2.15.2",
+      "gitHead": "b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d",
+      "package_json_sha256": "278cd6da0be36e0c534d85292cfd40bd9895a2c9929cb54490ed6934b66eab70",
+      "file": "notice-data/hocuspocus-provider-2.15.2-LICENSE",
+      "sha256": "db393bb93f624cb322cf8e7db1607d8cebfb325af6acfa75eae6c7f1ad04d2cf",
+      "bytes": 1072,
+      "source": "https://raw.githubusercontent.com/ueberdosis/hocuspocus/b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d/LICENSE.md",
+      "source_commit": "b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d",
+      "registry_metadata": {
+        "source": "https://registry.npmjs.org/@hocuspocus/extension-logger",
+        "version": "2.15.2",
+        "sha256": "e43b9540427b522fcca8f14f16afab790ea3c60e318ebf94c1c4f5b32392cfc5",
+        "gitHead": "b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d",
+        "dist_integrity": "sha512-nqSnSFI+xO7dBTsgzSANKvx09ptq8J4Doz3AdLgxfaweYC85qFao7mAx1ZCtWoVHseVwBYua6S3dTwQq5IsWEg=="
+      }
+    },
+    "@hocuspocus/extension-redis@2.15.2": {
+      "name": "@hocuspocus/extension-redis",
+      "version": "2.15.2",
+      "gitHead": "b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d",
+      "package_json_sha256": "5e284d653f7cc2372625209ef06043c0768e47f97a3fe9777e18ea7d98cf6a0d",
+      "file": "notice-data/hocuspocus-provider-2.15.2-LICENSE",
+      "sha256": "db393bb93f624cb322cf8e7db1607d8cebfb325af6acfa75eae6c7f1ad04d2cf",
+      "bytes": 1072,
+      "source": "https://raw.githubusercontent.com/ueberdosis/hocuspocus/b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d/LICENSE.md",
+      "source_commit": "b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d",
+      "registry_metadata": {
+        "source": "https://registry.npmjs.org/@hocuspocus/extension-redis",
+        "version": "2.15.2",
+        "sha256": "2587d61f8514dc8d2a6c99972e922e9c14161e7a24b593d0071511166b1509ca",
+        "gitHead": "b3454a4ca289a84ddfb7fa5607a2d4b8d5c37e9d",
+        "dist_integrity": "sha512-2BNBLnDEQq2v3uQSidBSdUOIbHhH383SGxn+hmy6tDQfrt2hLE4MwilgDdcCO0FKOCYaJrV7HyKu6/WyzLbAOg=="
+      }
+    },
+    "@hocuspocus/transformer@2.15.2": {
+      "name": "@hocuspocus/transformer",
+      "version": "2.15.2",
+      "gitHead": "8f2e9df95de9968d70622ea8697c303a333b6cb3",
+      "package_json_sha256": "59c47b74c0d38bbaea237b006f930eea20d1e1e792b7bc67aaf75f0cc6db51fb",
+      "file": "notice-data/hocuspocus-transformer-2.15.2-LICENSE",
+      "sha256": "dce30f7f8fff923e74d41b44a620714e928dd7708064c807d94f50210a1179d7",
+      "bytes": 1069,
+      "source": "https://raw.githubusercontent.com/ueberdosis/hocuspocus/05fa1e12e4cd4220af817f7c265bbd3fd9c53fec/LICENSE.md",
+      "source_commit": "05fa1e12e4cd4220af817f7c265bbd3fd9c53fec",
+      "registry_metadata": {
+        "source": "https://registry.npmjs.org/@hocuspocus/transformer",
+        "version": "2.15.2",
+        "sha256": "625d68a9f7b2693fd66f6b98c007d30ea35d7543318befc0188f5221997ae1c5",
+        "gitHead": "8f2e9df95de9968d70622ea8697c303a333b6cb3",
+        "dist_integrity": "sha512-FAo/rt0kch+YeBBp/iit74q+4RV6YRjdZXmvE0/Aw+n/nSW1W0ZNGXnhncfm8qP0CuXnss/Aw8dpfEPZKUWDJw=="
+      },
+      "source_version_evidence": {
+        "release_tag": "v2.15.2",
+        "package_json_source": "https://raw.githubusercontent.com/ueberdosis/hocuspocus/05fa1e12e4cd4220af817f7c265bbd3fd9c53fec/packages/transformer/package.json",
+        "package_json_sha256": "59c47b74c0d38bbaea237b006f930eea20d1e1e792b7bc67aaf75f0cc6db51fb",
+        "qualification": "The published gitHead is stale and points to an old alpha with no LICENSE. Exact v2.15.2 release package metadata is byte-identical to the installed package; the original release root license is retained."
+      }
+    }
+  },
+  "node": {
+    "version": "v22.23.4",
+    "source_commit": "27f213124280b4db4cd1e3dd42f6f8afd01ceff7",
+    "file": "notice-data/node-v22.23.4-LICENSE",
+    "source": "https://raw.githubusercontent.com/nodejs/node/27f213124280b4db4cd1e3dd42f6f8afd01ceff7/LICENSE",
+    "sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
+    "bytes": 145485
+  }
+}

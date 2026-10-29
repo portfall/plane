@@ -5,7 +5,9 @@ COPY . .
 RUN corepack enable \
     && CI=1 pnpm install --frozen-lockfile --ignore-scripts --filter '@plane/editor...' \
     && pnpm --filter @plane/types --filter @plane/constants --filter @plane/utils --filter @plane/hooks --filter @plane/propel --filter @plane/ui -r exec tsdown \
-    && pnpm --filter @plane/editor exec tsdown --config ../../deployments/portfall/codec.config.mjs
+    && pnpm --filter @plane/editor exec tsdown --config ../../deployments/portfall/codec.config.mjs \
+    && node --test deployments/portfall/test-generate-node-notices.mjs
+RUN --network=none node deployments/portfall/generate-node-notices.mjs /src @plane/editor /notices/codec
 
 FROM python:3.12.16-alpine3.24@sha256:44bf3bcc455e0c9ccd912b78f39019b2f7e9d2f4fb47c6d6973c7638a99aff14 AS dependencies
 WORKDIR /build
@@ -24,6 +26,7 @@ RUN --mount=type=bind,from=dependencies,source=/wheels,target=/wheels \
     && python -m pip check
 COPY --from=codec /usr/local/bin/node /usr/local/bin/node
 COPY --from=codec /codec/project-bundle-codec.mjs /code/project-bundle-codec.mjs
+COPY --from=codec /notices/codec/ /usr/share/plane-build/
 COPY --from=dependencies /wheels/SHA256SUMS /usr/share/plane-build/python-wheels.sha256
 COPY apps/api/requirements/portfall.lock /usr/share/plane-build/requirements.lock
 WORKDIR /code

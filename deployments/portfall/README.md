@@ -134,5 +134,58 @@ The internal image workflow retains actual AMD64 CycloneDX/native Syft reports,
 image-config metadata and a source-bound checksum receipt for operator review.
 It uses the separately reviewed, checksum-pinned Syft 1.55.0 operator binary;
 only archive data is scanned and no image or registry credential is published.
-The retained metadata is not an image release, license decision, signature,
-complete static-JavaScript/codec attribution or corresponding-source clearance.
+The retained metadata is not an image release, license decision, signature or
+corresponding-source clearance.
+
+## JavaScript and codec notices
+
+`generate-node-notices.mjs` queries the installed pinned pnpm 11.3.0 production
+dependency closure for each fixed workspace: `web`, `admin`, `space`, `live`, and
+`@plane/editor` for the API's bundled codec. Generation runs with networking
+disabled after the frozen installation. It adds no dependency and installs
+nothing. Each closure is a conservative superset; it does not claim exact
+browser-bundle or codec reachability. It retains original package metadata,
+versions, license/NOTICE/copyright/attribution files and README texts, with byte
+lengths and SHA-256 hashes. Package-owned regular files are read within the
+installed pnpm store; notice symlinks, oversized files, missing source texts and
+package identity/version mismatches fail generation. The original Plane root
+AGPL license is included with the root and selected workspace metadata.
+
+All five images install `THIRD_PARTY_NOTICES` and `node-notices.json` under
+`/usr/share/plane-build/`. Web serves `/THIRD_PARTY_NOTICES`; Admin serves
+`/god-mode/THIRD_PARTY_NOTICES`; Space serves `/spaces/THIRD_PARTY_NOTICES`
+through its existing mounted base path. The static copies contain the same
+bytes as the installed bundle. Live and the API codec retain their installed
+notice path without adding an application route.
+
+The notice-data records pin upstream license supplements to the
+exact npm version, npm `gitHead`, original installed metadata hash and original
+text hash: `@hocuspocus/provider@2.15.2`, `@tiptap/extension-emoji@2.27.3`, and
+Live's `@hocuspocus/extension-logger@2.15.2`,
+`@hocuspocus/extension-redis@2.15.2` and `@hocuspocus/transformer@2.15.2`.
+Transformer's published `gitHead` points to an older alpha; its exact `v2.15.2`
+release package metadata is byte-identical to the installed metadata. Its
+separate original release license and this provenance qualification are retained;
+the stale `gitHead` is not treated as the release source.
+`client-only@0.0.1` has only an MIT metadata declaration in its published archive,
+with no original license text or copyright notice. Its exact metadata hash and
+primary source are retained as an explicit qualified gap in the bundle and
+manifest. No copyright holder or substitute grant is invented. Metadata
+expressions, README-only evidence and supplements still require their own
+license review; this packaging mechanism does not approve them.
+
+The pinned Alpine Node distribution lacks Node's own LICENSE file. Live, Space
+and the API therefore retain the full original Node v22.23.4 distribution
+LICENSE, including its third-party sections, as
+`/usr/share/plane-build/NODE_LICENSE` and inside their notice bundle. Its immutable
+upstream revision, version and hash are recorded; generation refuses a Node
+version mismatch. Web and Admin do not ship the build-stage Node executable.
+
+Native CI runs the focused notice tests and checks actual image paths, manifest
+hashes, original Plane AGPL text, full Node license and matching frontend copies.
+It retains these exact files with the actual image inventories. This closes the
+packaging path for the recorded JavaScript closures; Python, OS, NGINX, image
+provenance, security and remaining license/source-evidence decisions retain
+their separate release checks. The internal Plane exception remains excluded
+from customer images and bundles, and the existing corresponding-source offer
+requirements remain in force.
