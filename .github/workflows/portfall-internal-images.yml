@@ -72,3 +72,63 @@ jobs:
             --env DATABASE_URL=postgresql://synthetic:synthetic@127.0.0.1:5432/synthetic \
             --entrypoint sh local/plane-api:ci -c \
             'python -m pip check && python manage.py export_project_bundle --help && python manage.py import_project_bundle --help && node --version && sha256sum /code/project-bundle-codec.mjs'
+
+      - name: Collect native image inventories without registry publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          plane_scan_tmp=$(mktemp -d)
+          trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_scan_tmp"' EXIT
+          plane_inventory="${{ runner.temp }}/plane-native-inventory"
+          mkdir -m 700 "$plane_inventory"
+          curl --fail --silent --show-error --location --max-time 120 \
+            https://github.com/anchore/syft/releases/download/v1.55.0/syft_1.55.0_linux_amd64.tar.gz \
+            -o "$plane_scan_tmp/syft.tar.gz"
+          printf '%s  %s\n' bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d "$plane_scan_tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf "$plane_scan_tmp/syft.tar.gz" -C "$plane_scan_tmp" syft LICENSE
+          printf '%s  %s\n' 64c9631c3560336c55c549df0de08cd577d02399c9de807ac390960a4ed5c351 "$plane_scan_tmp/syft" | sha256sum -c -
+          cp "$plane_scan_tmp/LICENSE" "$plane_inventory/scanner-LICENSE"
+          mkdir -m 700 "$plane_scan_tmp/home" "$plane_scan_tmp/docker" "$plane_scan_tmp/cache"
+          printf '{}' > "$plane_scan_tmp/docker/config.json"
+          printf 'check-for-app-update: false\nlicenses:\n  include-content: all\npackage:\n  search-indexed-archives: false\n  search-unindexed-archives: false\n' > "$plane_scan_tmp/syft.yaml"
+          for role in api live space web admin; do
+            image="local/plane-$role:ci"
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+            image_id=$(docker image inspect --format '{{.Id}}' "$image")
+            docker image inspect "$image" > "$plane_inventory/$role-image.json"
+            docker image save --output "$plane_scan_tmp/image.tar" "$image"
+            env -i PATH="$PATH" HOME="$plane_scan_tmp/home" XDG_CACHE_HOME="$plane_scan_tmp/cache" \
+              DOCKER_CONFIG="$plane_scan_tmp/docker" GOMEMLIMIT=2GiB GOMAXPROCS=2 \
+              "$plane_scan_tmp/syft" scan "docker-archive:$plane_scan_tmp/image.tar" \
+              --config "$plane_scan_tmp/syft.yaml" --scope squashed \
+              --source-name "internal-plane-$role" --source-version "$image_id" \
+              -o "cyclonedx-json=$plane_inventory/$role.cdx.json" \
+              -o "syft-json=$plane_inventory/$role.syft.json"
+            python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$plane_scan_tmp/image.tar"
+          done
+          python3 -I - "$plane_inventory" "$GITHUB_SHA" <<'PYRECEIPT'
+          from pathlib import Path
+          import hashlib, json, sys
+          root = Path(sys.argv[1])
+          for role in ['api', 'live', 'space', 'web', 'admin']:
+              cdx = json.loads((root / f'{role}.cdx.json').read_text())
+              native = json.loads((root / f'{role}.syft.json').read_text())
+              assert cdx['bomFormat'] == 'CycloneDX' and cdx['components']
+              assert native['artifacts']
+          files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
+          (root / 'collection.json').write_text(json.dumps({
+              'source_commit': sys.argv[2], 'platform': 'linux/amd64',
+              'scanner_version': '1.55.0', 'files': files,
+              'registry_publication': False, 'license_approved': False,
+              'source_fulfillment_complete': False,
+              'scope': 'Actual local image config identities; not registry manifest subjects or complete browser-bundle/codec attribution'
+          }, indent=2) + '\n')
+          PYRECEIPT
+      - name: Retain metadata inventories for operator review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: plane-native-amd64-inventory-${{ github.sha }}
+          path: ${{ runner.temp }}/plane-native-inventory
+          if-no-files-found: error
+          retention-days: 7

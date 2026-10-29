@@ -126,3 +126,13 @@ The combined source, offline codec, native importer, editor/browser and final
 images need their own integration receipts. Publish the final committed source
 corresponding to each deployed image; neither historical commit alone describes
 this combined build.
+
+
+## Native CI artifact inventory
+
+The internal image workflow retains actual AMD64 CycloneDX/native Syft reports,
+image-config metadata and a source-bound checksum receipt for operator review.
+It uses the separately reviewed, checksum-pinned Syft 1.55.0 operator binary;
+only archive data is scanned and no image or registry credential is published.
+The retained metadata is not an image release, license decision, signature,
+complete static-JavaScript/codec attribution or corresponding-source clearance.
