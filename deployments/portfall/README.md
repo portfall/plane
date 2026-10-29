@@ -151,6 +151,32 @@ installed pnpm store; notice symlinks, oversized files, missing source texts and
 package identity/version mismatches fail generation. The original Plane root
 AGPL license is included with the root and selected workspace metadata.
 
+Live and Space additionally generate notices after offline deployment preparation
+and byte verification, with networking disabled. The generator reruns
+`verifyDeploy` against the frozen installation, then includes every physical
+package root under the deployed pnpm store, including duplicate peer contexts
+and roots absent from pnpm's reported production closure. Nested package.json
+subpaths discovered by scanners are not counted as separate installed roots.
+The original conservative closure remains included for bundled code.
+
+Each `node-notices.json` deployment record maps a physical path, name, version
+and package fingerprint to its retained original metadata/notice record by
+`notice_package_index`. `deployment.packages_json_sha256` hashes the exact
+`packages.json` serialization emitted by `verify-deploy.mjs` (including its final
+newline). That existing inventory covers external package bytes; the deployment
+mapping also includes owned workspace roots, whose `dist` bytes are verified and
+whose original metadata and Plane root AGPL text are retained. Notice generation
+rejects changed/unmapped external bytes, missing originals, version mismatches
+and escaping links. It accepts no caller-supplied inventory in place of actual
+byte verification. Final-image reconciliation must compare these records with
+the actual shipped roots; a source test alone does not prove the final image.
+
+README-only records are retained source evidence with a completeness
+qualification: a README may contain attribution without a complete license
+grant. Their presence does not establish full license text or license clearance.
+Unknown packages with no original notice source still fail generation; the
+existing exact-version `client-only` qualification remains explicit.
+
 All five images install `THIRD_PARTY_NOTICES` and `node-notices.json` under
 `/usr/share/plane-build/`. Web serves `/THIRD_PARTY_NOTICES`; Admin serves
 `/god-mode/THIRD_PARTY_NOTICES`; Space serves `/spaces/THIRD_PARTY_NOTICES`
@@ -183,8 +209,8 @@ version mismatch. Web and Admin do not ship the build-stage Node executable.
 
 Native CI runs the focused notice tests and checks actual image paths, manifest
 hashes, original Plane AGPL text, full Node license and matching frontend copies.
-It retains these exact files with the actual image inventories. This closes the
-packaging path for the recorded JavaScript closures; Python, OS, NGINX, image
+It retains these exact files with the actual image inventories. This checks the
+packaging path for the recorded JavaScript closures and verified deployed roots; Python, OS, NGINX, image
 provenance, security and remaining license/source-evidence decisions retain
 their separate release checks. The internal Plane exception remains excluded
 from customer images and bundles, and the existing corresponding-source offer

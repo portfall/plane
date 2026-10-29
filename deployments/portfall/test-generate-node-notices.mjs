@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { generateNodeNotices } from "./generate-node-notices.mjs";
+import { verifyDeploy } from "./verify-deploy.mjs";
 
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -133,4 +134,107 @@ test("uses version-bound primary originals and keeps the known metadata-only gap
       assert.throws(() => generateNodeNotices(root, "web", report), /override source\/version mismatch/);
     });
   }
+});
+
+function deployedFixture(run) {
+  fixture(({ root, directory, report }) => {
+    mkdirSync(join(root, "apps/live"), { recursive: true });
+    writeFileSync(join(root, "apps/live/package.json"), '{"name":"live","version":"1.4.2"}\n');
+    const workspace = join(root, "packages/owned");
+    mkdirSync(join(workspace, "dist"), { recursive: true });
+    writeFileSync(join(workspace, "package.json"), '{"name":"@plane/owned","version":"1.4.2"}\n');
+    writeFileSync(join(workspace, "dist/index.js"), "export default 42;");
+    const store = join(root, "node_modules/.pnpm");
+    cpSync(workspace, join(store, "owned/node_modules/@plane/owned"), { recursive: true });
+    for (const context of ["one", "two"]) {
+      const pkg = join(store, `deploy-only@1.0.0_${context}/node_modules/deploy-only`);
+      mkdirSync(join(pkg, "subpath"), { recursive: true });
+      writeFileSync(join(pkg, "package.json"), '{"name":"deploy-only","version":"1.0.0","license":"MIT"}\n');
+      writeFileSync(join(pkg, "LICENSE"), `Original deployed grant and copyright ${context}\n`);
+      writeFileSync(join(pkg, "subpath/package.json"), '{"name":"scanner-subpath","version":"99.0.0"}');
+    }
+    const target = join(root, "deployed");
+    mkdirSync(target);
+    cpSync(join(root, "node_modules"), join(target, "node_modules"), { recursive: true });
+    cpSync(join(root, "apps/live/package.json"), join(target, "package.json"));
+    const descriptor = Object.getOwnPropertyDescriptor(process, "version");
+    try {
+      Object.defineProperty(process, "version", { value: "v22.23.4" });
+      run({ root, target, report, directory, store });
+    } finally {
+      Object.defineProperty(process, "version", descriptor);
+    }
+  });
+}
+
+test("covers every verified physical root outside the reported closure, including duplicate contexts and owned workspaces", () => {
+  deployedFixture(({ root, target, report }) => {
+    const inventory = verifyDeploy(root, target);
+    const { notices, manifest } = generateNodeNotices(root, "live", report, target);
+    assert.equal(manifest.deployment.packages_json_sha256, hash(JSON.stringify(inventory, null, 2) + "\n"));
+    assert.equal(manifest.deployment.packages.length, 4);
+    const extra = manifest.deployment.packages.filter((p) => p.name === "deploy-only");
+    assert.equal(extra.length, 2);
+    assert.equal(new Set(extra.map((p) => p.path)).size, 2);
+    assert.equal(new Set(extra.map((p) => p.sha256)).size, 2);
+    for (const physical of manifest.deployment.packages) {
+      const pkg = manifest.packages[physical.notice_package_index];
+      assert.equal(pkg.name, physical.name);
+      assert.equal(pkg.version, physical.version);
+      assert.equal(pkg.path, physical.path);
+      assert.equal(pkg.origin, "verified deployment");
+      const dir = join(target, physical.path);
+      const raw = readFileSync(join(dir, "package.json"));
+      assert.equal(pkg.package_json_sha256, hash(raw));
+      assert.ok(notices.includes(raw));
+      for (const file of pkg.files) {
+        const bytes = readFileSync(
+          file.source === "Plane root LICENSE.txt" ? join(root, "LICENSE.txt") : join(dir, file.path)
+        );
+        assert.equal(file.sha256, hash(bytes));
+        assert.ok(notices.includes(bytes));
+      }
+      if (physical.name !== "@plane/owned")
+        assert.ok(
+          inventory.some(
+            (p) => p.name === physical.name && p.version === physical.version && p.sha256 === physical.sha256
+          )
+        );
+    }
+    assert.ok(manifest.packages.some((p) => p.name === "example" && !p.origin));
+    assert.ok(!manifest.packages.some((p) => p.name === "scanner-subpath"));
+    assert.deepEqual(generateNodeNotices(root, "live", report, target), { notices, manifest });
+  });
+});
+
+for (const fault of ["changed bytes", "missing source", "missing originals", "escaping link", "wrong app"]) {
+  test(`refuses unsafe physical notice mapping: ${fault}`, () => {
+    deployedFixture(({ root, target, report, store }) => {
+      const rel = "node_modules/.pnpm/deploy-only@1.0.0_one/node_modules/deploy-only";
+      if (fault === "changed bytes") writeFileSync(join(target, rel, "LICENSE"), "changed grant");
+      if (fault === "missing source") rmSync(join(store, "deploy-only@1.0.0_one"), { recursive: true });
+      if (fault === "missing originals") {
+        rmSync(join(root, rel, "LICENSE"));
+        rmSync(join(target, rel, "LICENSE"));
+      }
+      if (fault === "escaping link") symlinkSync(root, join(target, "outside"));
+      if (fault === "wrong app") writeFileSync(join(target, "package.json"), '{"name":"space","version":"1.4.2"}');
+      assert.throws(
+        () => generateNodeNotices(root, "live", report, target),
+        /differs from frozen|missing original notice|escapes output|deployment.*identity/
+      );
+    });
+  });
+}
+
+test("labels README-only originals as qualified evidence without claiming complete license text", () => {
+  fixture(({ root, directory, report }) => {
+    rmSync(join(directory, "LICENSE"));
+    writeFileSync(join(directory, "README.md"), "Original attribution without a complete grant\n");
+    const { notices, manifest } = generateNodeNotices(root, "web", report);
+    const pkg = manifest.packages.find((p) => p.name === "example");
+    assert.match(pkg.evidence_qualification, /README-only.*does not establish complete license text/);
+    assert.ok(notices.includes(Buffer.from(pkg.evidence_qualification)));
+    assert.equal(manifest.license_approved, false);
+  });
 });

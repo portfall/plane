@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { fingerprint, packages, verifyDeploy } from "./verify-deploy.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const scopes = {
@@ -50,15 +52,19 @@ function noticeFiles(root) {
   return result;
 }
 
-export function generateNodeNotices(source, scope, report) {
+export function generateNodeNotices(source, scope, report, deployment) {
   if (!Object.hasOwn(scopes, scope)) throw new Error(`unsupported notice scope: ${scope}`);
   const root = realpathSync(source);
   const store = realpathSync(join(root, "node_modules/.pnpm"));
   if (!inside(root, store)) throw new Error("installed store outside source root");
+  if (deployment && !["live", "space"].includes(scope)) throw new Error("unsupported deployment notice scope");
+  const deployedRoot = deployment ? realpathSync(deployment) : undefined;
+  // Recompute from actual deployed bytes, never trust a supplied JSON inventory.
+  const inventory = deployedRoot ? verifyDeploy(root, deployedRoot) : undefined;
   const data = JSON.parse(readFileSync(join(here, "node-notice-data.json"), "utf8"));
   const chunks = [
     Buffer.from(
-      `THIRD_PARTY_NOTICES — Internal Plane (${scope})\nConservative installed production dependency closure, not exact bundled reachability.\nOriginal metadata declarations and source texts are retained below; no license approval is implied.\nQualified evidence gaps, if any, remain recorded in the manifest. Customer bundles excluded.\n\n`
+      `THIRD_PARTY_NOTICES — Internal Plane (${scope})\nConservative installed production dependency closure, not exact bundled reachability.${deployedRoot ? " Plus every verified physical deployed package root." : ""}\nOriginal metadata declarations and source texts are retained below; no license approval is implied.\nQualified evidence gaps, if any, remain recorded in the manifest. Customer bundles excluded.\n\n`
     ),
   ];
   const manifest = {
@@ -81,7 +87,7 @@ export function generateNodeNotices(source, scope, report) {
     );
     return { sha256, bytes: bytes.length };
   }
-  function addPackage(directory, expected, originalFiles, override) {
+  function addPackage(directory, expected, originalFiles, override, pathRoot = root) {
     const raw = readBounded(directory, join(directory, "package.json"));
     const metadata = JSON.parse(raw);
     if (metadata.name !== expected.name || !expected.versions.includes(metadata.version))
@@ -91,7 +97,7 @@ export function generateNodeNotices(source, scope, report) {
     const pkg = {
       name: metadata.name,
       version: metadata.version,
-      path: relative(root, directory),
+      path: relative(pathRoot, directory),
       metadata,
       package_json_sha256,
       files: [],
@@ -112,7 +118,7 @@ export function generateNodeNotices(source, scope, report) {
         originalFiles.push({ path: "UPSTREAM_LICENSE", bytes, source: override.source });
       } else {
         const gap = { package: key, source: override.source, reason: override.reason };
-        manifest.qualified_gaps.push(gap);
+        if (!manifest.qualified_gaps.some((existing) => existing.package === key)) manifest.qualified_gaps.push(gap);
         chunks.push(
           Buffer.from(
             `\nQUALIFIED METADATA-ONLY NOTICE GAP: ${key}\n${override.reason}\nPrimary metadata: ${override.source}\n`
@@ -121,6 +127,11 @@ export function generateNodeNotices(source, scope, report) {
       }
     }
     if (!originalFiles.length && !override?.reason) throw new Error(`missing original notice source: ${key}`);
+    if (originalFiles.length && originalFiles.every((file) => /^readme(?:$|[._-])/i.test(basename(file.path)))) {
+      pkg.evidence_qualification =
+        "README-only source evidence does not establish complete license text or license clearance.";
+      chunks.push(Buffer.from(`\nEVIDENCE QUALIFICATION: ${key}\n${pkg.evidence_qualification}\n`));
+    }
     for (const file of originalFiles)
       pkg.files.push({
         path: file.path,
@@ -176,6 +187,51 @@ export function generateNodeNotices(source, scope, report) {
     if (row.versions.some((version) => !versions.has(version)))
       throw new Error(`missing installed source version: ${row.name}`);
   }
+  if (deployedRoot) {
+    const app = JSON.parse(readBounded(deployedRoot, join(deployedRoot, "package.json")));
+    if (app.name !== scope || app.version !== workspaceMetadata.version)
+      throw new Error("deployment app identity/version mismatch");
+    const deployedStore = realpathSync(join(deployedRoot, "node_modules/.pnpm"));
+    if (!inside(deployedRoot, deployedStore)) throw new Error("deployment store outside output");
+    const workspaces = new Map(
+      readdirSync(join(root, "packages")).map((name) => {
+        const directory = join(root, "packages", name);
+        const metadata = JSON.parse(readBounded(directory, join(directory, "package.json")));
+        return [metadata.name, metadata.version];
+      })
+    );
+    manifest.deployment = {
+      packages_json_sha256: hash(JSON.stringify(inventory, null, 2) + "\n"),
+      packages: [],
+    };
+    for (const input of packages(deployedRoot).toSorted()) {
+      const directory = realpathSync(input);
+      if (directory === deployedStore || !inside(deployedStore, directory))
+        throw new Error(`package outside deployment store: ${input}`);
+      const metadata = JSON.parse(readBounded(directory, join(directory, "package.json")));
+      const owned = workspaces.has(metadata.name);
+      if (owned && workspaces.get(metadata.name) !== metadata.version)
+        throw new Error(`deployment workspace version mismatch: ${metadata.name}`);
+      const originalFiles = noticeFiles(directory);
+      if (owned) originalFiles.push(...planeFiles);
+      const notice_package_index = manifest.packages.length;
+      addPackage(
+        directory,
+        { name: metadata.name, versions: [metadata.version] },
+        originalFiles,
+        originalFiles.length ? undefined : data.packages[`${metadata.name}@${metadata.version}`],
+        deployedRoot
+      );
+      manifest.packages[notice_package_index].origin = "verified deployment";
+      manifest.deployment.packages.push({
+        path: relative(deployedRoot, directory),
+        name: metadata.name,
+        version: metadata.version,
+        sha256: fingerprint(directory),
+        notice_package_index,
+      });
+    }
+  }
   if (["live", "space", "@plane/editor"].includes(scope)) {
     if (process.version !== data.node.version)
       throw new Error(`Node version mismatch: expected ${data.node.version}, got ${process.version}`);
@@ -204,9 +260,15 @@ export function generateNodeNotices(source, scope, report) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [source, scope, output] = process.argv.slice(2);
-  if (process.argv.length !== 5 || !Object.hasOwn(scopes, scope))
-    throw new Error("usage: generate-node-notices.mjs source web|admin|space|live|@plane/editor output");
+  const [source, scope, output, deployment] = process.argv.slice(2);
+  if (
+    ![5, 6].includes(process.argv.length) ||
+    !Object.hasOwn(scopes, scope) ||
+    ["live", "space"].includes(scope) !== Boolean(deployment)
+  )
+    throw new Error(
+      "usage: generate-node-notices.mjs source web|admin|space|live|@plane/editor output [deployment-required-for-live-space]"
+    );
   const root = realpathSync(source);
   const env = { ...process.env, COREPACK_ENABLE_NETWORK: "0", npm_config_offline: "true" };
   if (execFileSync("pnpm", ["--version"], { cwd: root, env, encoding: "utf8" }).trim() !== "11.3.0")
@@ -218,7 +280,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       maxBuffer: 16 * 1024 * 1024,
     })
   );
-  const { notices, manifest } = generateNodeNotices(root, scope, report);
+  const { notices, manifest } = generateNodeNotices(root, scope, report, deployment);
   mkdirSync(output, { recursive: true });
   writeFileSync(join(output, "THIRD_PARTY_NOTICES"), notices);
   writeFileSync(join(output, "node-notices.json"), JSON.stringify(manifest, null, 2) + "\n");

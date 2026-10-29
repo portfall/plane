@@ -13,7 +13,7 @@ function files(directory, prefix = "") {
     .toSorted();
 }
 
-function fingerprint(directory) {
+export function fingerprint(directory) {
   const hash = createHash("sha256");
   for (const name of files(directory)) {
     const path = join(directory, name);
@@ -31,7 +31,7 @@ function fingerprint(directory) {
   return hash.digest("hex");
 }
 
-function packages(directory) {
+export function packages(directory) {
   const store = join(directory, "node_modules/.pnpm");
   const result = [];
   for (const entry of readdirSync(store, { withFileTypes: true })) {
