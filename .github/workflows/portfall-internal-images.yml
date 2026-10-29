@@ -91,7 +91,7 @@ jobs:
           cp "$plane_scan_tmp/LICENSE" "$plane_inventory/scanner-LICENSE"
           mkdir -m 700 "$plane_scan_tmp/home" "$plane_scan_tmp/docker" "$plane_scan_tmp/cache"
           printf '{}' > "$plane_scan_tmp/docker/config.json"
-          printf 'check-for-app-update: false\nlicenses:\n  include-content: all\npackage:\n  search-indexed-archives: false\n  search-unindexed-archives: false\n' > "$plane_scan_tmp/syft.yaml"
+          printf 'check-for-app-update: false\nlicense:\n  content: all\npackage:\n  search-indexed-archives: false\n  search-unindexed-archives: false\n' > "$plane_scan_tmp/syft.yaml"
           for role in api live space web admin; do
             image="local/plane-$role:ci"
             test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
@@ -116,6 +116,7 @@ jobs:
               native = json.loads((root / f'{role}.syft.json').read_text())
               assert cdx['bomFormat'] == 'CycloneDX' and cdx['components']
               assert native['artifacts']
+              assert native['descriptor']['configuration']['licenses']['include-content'] == 'all'
           files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
           (root / 'collection.json').write_text(json.dumps({
               'source_commit': sys.argv[2], 'platform': 'linux/amd64',
