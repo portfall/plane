@@ -111,6 +111,13 @@ jobs:
                 test -s "$plane_inventory/$role-NODE_LICENSE" ;;
             esac
             case "$role" in
+              live|space)
+                docker run --rm --network none --read-only --cap-drop ALL \
+                  --security-opt no-new-privileges --entrypoint cat "$image" \
+                  /usr/share/plane-build/packages.json > "$plane_inventory/$role-packages.json"
+                test -s "$plane_inventory/$role-packages.json" ;;
+            esac
+            case "$role" in
               web) public_notice=/usr/share/nginx/html/THIRD_PARTY_NOTICES ;;
               admin) public_notice=/usr/share/nginx/html/god-mode/THIRD_PARTY_NOTICES ;;
               space) public_notice=/app/build/client/THIRD_PARTY_NOTICES ;;
@@ -133,6 +140,7 @@ jobs:
             python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$plane_scan_tmp/image.tar"
           done
           python3 -I - "$plane_inventory" "$GITHUB_SHA" <<'PYRECEIPT'
+          from collections import Counter
           from pathlib import Path
           import hashlib, json, sys
           root = Path(sys.argv[1])
@@ -152,6 +160,21 @@ jobs:
               for package in manifest['packages']:
                   assert package['version'] and package['package_json_sha256']
                   assert package['files'] or any(gap['package'] == f"{package['name']}@{package['version']}" for gap in manifest['qualified_gaps'])
+              if role in ['live', 'space']:
+                  inventory_bytes = (root / f'{role}-packages.json').read_bytes()
+                  inventory = json.loads(inventory_bytes)
+                  deployment = manifest['deployment']
+                  assert hashlib.sha256(inventory_bytes).hexdigest() == deployment['packages_json_sha256']
+                  physical = deployment['packages']
+                  assert len(physical) >= len(inventory) and len({p['path'] for p in physical}) == len(physical)
+                  expected = Counter((p['name'], p['version'], p['sha256']) for p in inventory)
+                  retained = Counter((p['name'], p['version'], p['sha256']) for p in physical)
+                  assert not (expected - retained)
+                  for package in physical:
+                      record = manifest['packages'][package['notice_package_index']]
+                      assert record['origin'] == 'verified deployment'
+                      assert (record['path'], record['name'], record['version']) == (package['path'], package['name'], package['version'])
+                      assert record['package_json_sha256']
               if role in ['api', 'live', 'space']:
                   node_license = (root / f'{role}-NODE_LICENSE').read_bytes()
                   assert manifest['node']['version'] == 'v22.23.4'
