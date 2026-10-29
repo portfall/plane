@@ -90,3 +90,4 @@ from .device import Device, DeviceSession
 from .sticky import Sticky
 
 from .description import Description, DescriptionVersion
+from .project_migration import ProjectMigrationRun

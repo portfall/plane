@@ -1,77 +1,78 @@
 # base requirements
 
 # django
-Django==5.2.15
+Django==5.2.18
 # rest framework
-djangorestframework==3.17.1
+djangorestframework==3.18.3
 # postgres
-psycopg==3.3.4
-psycopg-binary==3.3.4
-psycopg-c==3.3.4
-dj-database-url==3.0.1
+psycopg==3.3.6
+psycopg-binary==3.3.6
+psycopg-c==3.3.6
+dj-database-url==3.1.2
 # redis
-redis==5.0.4
+# Latest stable line allowed by Kombu 5.6 (redis extra requires <6.5).
+redis==6.4.0
 django-redis==7.0.0
 # cors
 django-cors-headers==4.9.0
 # celery
-celery==5.5.3
+celery==5.6.3
 django_celery_beat==2.9.0
 django-celery-results==2.6.0
 # file serve
 whitenoise==6.12.0
 # fake data
-faker==25.0.0
+faker==25.9.2
 # filters
 django-filter==25.2
 # json model
-jsonmodels==2.7.0
+jsonmodels==2.9.0
 # storage
 django-storages==1.14.6
 # user management
 django-crum==0.7.9
 # web server
-uvicorn==0.29.0
+uvicorn==0.54.0
 # sockets
 channels==4.3.2
 # ai
-openai==1.63.2
+openai==3.40.0
 # slack
-slack-sdk==3.27.1
+slack-sdk==3.45.0
 # apm
-scout-apm==3.5.3
+scout-apm==4.0.0
 # xlsx generation
-openpyxl==3.1.2
+openpyxl==3.1.5
 # logging
-python-json-logger==4.0.0
+python-json-logger==4.2.0
 # html parser
-beautifulsoup4==4.12.3
+beautifulsoup4==4.15.0
 # analytics
-posthog==3.5.0
+posthog==7.78.0
 # crypto
-cryptography==50.0.0
+cryptography==50.0.2
 # html validator
-lxml==6.1.0
+lxml==6.1.3
 # s3
-boto3==1.34.96
-# http client (pinned to address CVE-2026-44431 and CVE-2026-44432)
-urllib3>=2.7.0
+boto3==1.43.120
+# HTTP transport; 2.8 also fixes the September 2026 urllib3 advisories
+urllib3==2.8.0
 # requests — used directly for webhook delivery & link unfurling; pinned to
 # >=2.32 for the get_connection_with_tls_context adapter hook (SSRF IP pinning)
-requests==2.33.0
+requests==2.34.2
 # password validator
-zxcvbn==4.4.28
+zxcvbn==4.5.0
 # timezone
-pytz==2024.1
+pytz==2026.5
 # jwt
-PyJWT==2.13.0
+PyJWT==2.15.1
 # OpenTelemetry
-opentelemetry-api==1.28.1
-opentelemetry-sdk==1.28.1
-opentelemetry-instrumentation-django==0.49b1
-opentelemetry-exporter-otlp==1.28.1
-opentelemetry-exporter-otlp-proto-grpc==1.28.1
+opentelemetry-api==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-instrumentation-django==0.66b1
+opentelemetry-exporter-otlp==1.45.1
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
 # OpenAPI Specification
-drf-spectacular==0.29.0
+drf-spectacular==0.30.0
 # html sanitizer
-nh3==0.2.18
+nh3==0.3.7

@@ -1,0 +1,77 @@
+FROM node:22.23.4-alpine3.24@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS build
+WORKDIR /src
+ENV CI=1 HUSKY=0 TURBO_TELEMETRY_DISABLED=1 \
+    VITE_API_BASE_URL="" VITE_API_BASE_PATH=/api \
+    VITE_ADMIN_BASE_URL="" VITE_ADMIN_BASE_PATH=/god-mode \
+    VITE_SPACE_BASE_URL="" VITE_SPACE_BASE_PATH=/spaces \
+    VITE_LIVE_BASE_URL="" VITE_LIVE_BASE_PATH=/live \
+    VITE_WEB_BASE_URL="" VITE_WEB_BASE_PATH=""
+COPY . .
+RUN corepack enable \
+    && pnpm install --frozen-lockfile --ignore-scripts \
+    && pnpm exec turbo run build --filter=live... --filter=web --filter=admin --filter=space --concurrency=2 \
+    && node --test deployments/portfall/test-generate-node-notices.mjs
+RUN --network=none for app in web admin; do \
+      node deployments/portfall/generate-node-notices.mjs /src "$app" "/notices/$app" || exit 1; \
+    done
+
+FROM build AS live-deploy
+RUN pnpm --filter live --prod deploy --legacy --offline --ignore-scripts /out/live \
+    && node deployments/portfall/prepare-node-deploy.mjs /src /out/live \
+    && node deployments/portfall/verify-deploy.mjs /src /out/live > /out/live-packages.json \
+    && cd /out/live && node --input-type=module -e 'import sharp from "sharp"; await sharp({create:{width:2,height:2,channels:4,background:"#fff"}}).png().toBuffer()'
+
+RUN --network=none node deployments/portfall/generate-node-notices.mjs /src live /notices/live /out/live
+
+FROM build AS space-deploy
+RUN pnpm --filter space --prod deploy --legacy --offline --ignore-scripts /out/space \
+    && node deployments/portfall/prepare-node-deploy.mjs /src /out/space \
+    && node deployments/portfall/verify-deploy.mjs /src /out/space > /out/space-packages.json
+
+RUN --network=none node deployments/portfall/generate-node-notices.mjs /src space /notices/space /out/space
+
+FROM node:22.23.4-alpine3.24@sha256:fe4f6d74e20370acb04ad889077d14d0f64a9c8ea6a42bc60cddf1e844699914 AS node-runtime
+RUN corepack disable \
+    && node -e 'for (const p of ["/usr/local/lib/node_modules/npm", "/usr/local/lib/node_modules/corepack", "/usr/local/bin/npm", "/usr/local/bin/npx", "/usr/local/bin/corepack"]) require("node:fs").rmSync(p, {recursive:true, force:true})'
+ENV NODE_ENV=production PORT=3000
+WORKDIR /app
+USER 1000:1000
+EXPOSE 3000
+
+FROM node-runtime AS live
+COPY --from=live-deploy /out/live /app
+COPY --from=live-deploy /notices/live/ /usr/share/plane-build/
+COPY --from=live-deploy /out/live-packages.json /usr/share/plane-build/packages.json
+COPY pnpm-lock.yaml pnpm-workspace.yaml /usr/share/plane-build/
+CMD ["node", "dist/start.mjs"]
+
+FROM node-runtime AS space
+COPY --from=space-deploy /out/space /app
+COPY --from=build /src/apps/space/build /app/build
+COPY --from=space-deploy /notices/space/ /usr/share/plane-build/
+COPY --from=space-deploy /notices/space/THIRD_PARTY_NOTICES /app/build/client/THIRD_PARTY_NOTICES
+RUN test -f /app/build/server/index.js
+COPY --from=space-deploy /out/space-packages.json /usr/share/plane-build/packages.json
+COPY pnpm-lock.yaml pnpm-workspace.yaml /usr/share/plane-build/
+CMD ["node", "node_modules/@react-router/serve/dist/cli.js", "build/server/index.js"]
+
+FROM mirror.gcr.io/library/nginx:1.31.4-alpine3.24@sha256:db35bfc6b2951e7f8a72db5db120288c127ffaeeb4a6d4b95a26fead017d5913 AS static-runtime
+COPY deployments/portfall/nginx.conf /etc/nginx/nginx.conf
+COPY pnpm-lock.yaml pnpm-workspace.yaml /usr/share/plane-build/
+USER 101:101
+EXPOSE 3000
+ENTRYPOINT ["nginx", "-g", "daemon off;"]
+
+FROM static-runtime AS web
+COPY --from=build /src/apps/web/build/client /usr/share/nginx/html
+COPY --from=build /notices/web/ /usr/share/plane-build/
+COPY --from=build /notices/web/THIRD_PARTY_NOTICES /usr/share/nginx/html/THIRD_PARTY_NOTICES
+
+FROM static-runtime AS admin
+COPY --from=build /src/apps/admin/build/client /usr/share/nginx/html/god-mode
+COPY --from=build /notices/admin/ /usr/share/plane-build/
+COPY --from=build /notices/admin/THIRD_PARTY_NOTICES /usr/share/nginx/html/god-mode/THIRD_PARTY_NOTICES
+RUN test -f /usr/share/nginx/html/god-mode/index.html
+USER 0
+RUN sed -i 's@/index.html;@/god-mode/index.html;@' /etc/nginx/nginx.conf
+USER 101:101

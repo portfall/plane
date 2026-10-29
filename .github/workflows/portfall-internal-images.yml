@@ -1,0 +1,198 @@
+name: Portfall internal Plane images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["portfall-internal-*"]
+  pull_request:
+    paths:
+      - ".github/workflows/portfall-internal-images.yml"
+      - "deployments/portfall/**"
+      - "apps/api/**"
+      - "apps/live/**"
+      - "apps/web/**"
+      - "apps/admin/**"
+      - "apps/space/**"
+      - "packages/**"
+      - "patches/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfall-internal-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-images:
+    if: github.repository == 'portfall/plane'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Build and test native x86 images without publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          plane_build_tmp=$(mktemp -d)
+          trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_build_tmp"' EXIT
+          export DOCKER_CONFIG="$plane_build_tmp/docker"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '{}' > "$DOCKER_CONFIG/config.json"
+          for target in live space web admin; do
+            docker build --platform linux/amd64 --target "$target" \
+              -f deployments/portfall/Dockerfile.node -t "local/plane-$target:ci" .
+          done
+          docker build --platform linux/amd64 --target build \
+            -f deployments/portfall/Dockerfile.node -t local/plane-node-build:ci .
+          docker run --rm --network none --memory 3g --pids-limit 256 \
+            --env API_BASE_URL=http://api.invalid --env LIVE_SERVER_SECRET_KEY=synthetic-ci-only \
+            --entrypoint sh local/plane-node-build:ci -c \
+            'pnpm --filter live test && pnpm --filter @plane/editor test && node --test deployments/portfall/verify-deploy.test.mjs deployments/portfall/test-generate-node-notices.mjs'
+          docker build --platform linux/amd64 -f deployments/portfall/Dockerfile.api \
+            -t local/plane-api:ci .
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --ulimit core=0 --memory 512m --pids-limit 128 \
+            --tmpfs /tmp:rw,size=64m --entrypoint node local/plane-live:ci --input-type=module -e \
+            'import sharp from "sharp"; if(process.arch!=="x64") throw Error("wrong architecture"); const b=await sharp({create:{width:8,height:8,channels:4,background:"#fff"}}).resize(4,4).png().toBuffer(); const m=await sharp(b).metadata(); if(m.width!==4) throw Error("native image conversion failed"); console.log(JSON.stringify({node:process.version,arch:process.arch,sharp:sharp.versions.sharp,libvips:sharp.versions.vips,uid:process.getuid()}))'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --ulimit core=0 --memory 256m --pids-limit 128 \
+            --entrypoint node local/plane-space:ci -e \
+            'if(!require("node:fs").existsSync("/app/build/server/index.js")) throw Error("Space runtime entrypoint missing")'
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --ulimit core=0 --memory 1g --pids-limit 128 \
+            --tmpfs /tmp:rw,size=128m --tmpfs /code/plane/logs:rw,uid=10001,gid=10001,mode=0700 \
+            --env DJANGO_SETTINGS_MODULE=plane.settings.project_bundle \
+            --env SECRET_KEY=synthetic-ci-only --env REDIS_URL=redis://127.0.0.1:6379/0 \
+            --env DATABASE_URL=postgresql://synthetic:synthetic@127.0.0.1:5432/synthetic \
+            --entrypoint sh local/plane-api:ci -c \
+            'python -m pip check && python manage.py export_project_bundle --help && python manage.py import_project_bundle --help && node --version && sha256sum /code/project-bundle-codec.mjs'
+
+      - name: Collect native image inventories without registry publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          plane_scan_tmp=$(mktemp -d)
+          trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_scan_tmp"' EXIT
+          plane_inventory="${{ runner.temp }}/plane-native-inventory"
+          mkdir -m 700 "$plane_inventory"
+          curl --fail --silent --show-error --location --max-time 120 \
+            https://github.com/anchore/syft/releases/download/v1.55.0/syft_1.55.0_linux_amd64.tar.gz \
+            -o "$plane_scan_tmp/syft.tar.gz"
+          printf '%s  %s\n' bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d "$plane_scan_tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf "$plane_scan_tmp/syft.tar.gz" -C "$plane_scan_tmp" syft LICENSE
+          printf '%s  %s\n' 64c9631c3560336c55c549df0de08cd577d02399c9de807ac390960a4ed5c351 "$plane_scan_tmp/syft" | sha256sum -c -
+          cp "$plane_scan_tmp/LICENSE" "$plane_inventory/scanner-LICENSE"
+          mkdir -m 700 "$plane_scan_tmp/home" "$plane_scan_tmp/docker" "$plane_scan_tmp/cache"
+          printf '{}' > "$plane_scan_tmp/docker/config.json"
+          printf 'check-for-app-update: false\nlicense:\n  content: all\npackage:\n  search-indexed-archives: false\n  search-unindexed-archives: false\n' > "$plane_scan_tmp/syft.yaml"
+          for role in api live space web admin; do
+            image="local/plane-$role:ci"
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+            image_id=$(docker image inspect --format '{{.Id}}' "$image")
+            docker image inspect "$image" > "$plane_inventory/$role-image.json"
+            for notice_file in THIRD_PARTY_NOTICES node-notices.json; do
+              docker run --rm --network none --read-only --cap-drop ALL \
+                --security-opt no-new-privileges --entrypoint cat "$image" \
+                "/usr/share/plane-build/$notice_file" > "$plane_inventory/$role-$notice_file"
+              test -s "$plane_inventory/$role-$notice_file"
+            done
+            case "$role" in
+              api|live|space)
+                docker run --rm --network none --read-only --cap-drop ALL \
+                  --security-opt no-new-privileges --entrypoint cat "$image" \
+                  /usr/share/plane-build/NODE_LICENSE > "$plane_inventory/$role-NODE_LICENSE"
+                test -s "$plane_inventory/$role-NODE_LICENSE" ;;
+            esac
+            case "$role" in
+              live|space)
+                docker run --rm --network none --read-only --cap-drop ALL \
+                  --security-opt no-new-privileges --entrypoint cat "$image" \
+                  /usr/share/plane-build/packages.json > "$plane_inventory/$role-packages.json"
+                test -s "$plane_inventory/$role-packages.json" ;;
+            esac
+            case "$role" in
+              web) public_notice=/usr/share/nginx/html/THIRD_PARTY_NOTICES ;;
+              admin) public_notice=/usr/share/nginx/html/god-mode/THIRD_PARTY_NOTICES ;;
+              space) public_notice=/app/build/client/THIRD_PARTY_NOTICES ;;
+              *) public_notice= ;;
+            esac
+            if test -n "$public_notice"; then
+              docker run --rm --network none --read-only --cap-drop ALL \
+                --security-opt no-new-privileges --entrypoint cat "$image" \
+                "$public_notice" > "$plane_scan_tmp/public-notice"
+              cmp "$plane_scan_tmp/public-notice" "$plane_inventory/$role-THIRD_PARTY_NOTICES"
+            fi
+            docker image save --output "$plane_scan_tmp/image.tar" "$image"
+            env -i PATH="$PATH" HOME="$plane_scan_tmp/home" XDG_CACHE_HOME="$plane_scan_tmp/cache" \
+              DOCKER_CONFIG="$plane_scan_tmp/docker" GOMEMLIMIT=2GiB GOMAXPROCS=2 \
+              "$plane_scan_tmp/syft" scan "docker-archive:$plane_scan_tmp/image.tar" \
+              --config "$plane_scan_tmp/syft.yaml" --scope squashed \
+              --source-name "internal-plane-$role" --source-version "$image_id" \
+              -o "cyclonedx-json=$plane_inventory/$role.cdx.json" \
+              -o "syft-json=$plane_inventory/$role.syft.json"
+            python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$plane_scan_tmp/image.tar"
+          done
+          python3 -I - "$plane_inventory" "$GITHUB_SHA" <<'PYRECEIPT'
+          from collections import Counter
+          from pathlib import Path
+          import hashlib, json, sys
+          root = Path(sys.argv[1])
+          for role in ['api', 'live', 'space', 'web', 'admin']:
+              cdx = json.loads((root / f'{role}.cdx.json').read_text())
+              native = json.loads((root / f'{role}.syft.json').read_text())
+              assert cdx['bomFormat'] == 'CycloneDX' and cdx['components']
+              assert native['artifacts']
+              assert native['descriptor']['configuration']['licenses']['include-content'] == 'all'
+              notices = (root / f'{role}-THIRD_PARTY_NOTICES').read_bytes()
+              manifest = json.loads((root / f'{role}-node-notices.json').read_text())
+              assert manifest['scope'] == ('@plane/editor' if role == 'api' else role)
+              assert manifest['license_approved'] is False
+              assert manifest['packages'] and any(p['name'] == 'plane' for p in manifest['packages'])
+              assert hashlib.sha256(notices).hexdigest() == manifest['notices_sha256']
+              assert b'GNU AFFERO GENERAL PUBLIC LICENSE' in notices
+              for package in manifest['packages']:
+                  assert package['version'] and package['package_json_sha256']
+                  assert package['files'] or any(gap['package'] == f"{package['name']}@{package['version']}" for gap in manifest['qualified_gaps'])
+              if role in ['live', 'space']:
+                  inventory_bytes = (root / f'{role}-packages.json').read_bytes()
+                  inventory = json.loads(inventory_bytes)
+                  deployment = manifest['deployment']
+                  assert hashlib.sha256(inventory_bytes).hexdigest() == deployment['packages_json_sha256']
+                  physical = deployment['packages']
+                  assert len(physical) >= len(inventory) and len({p['path'] for p in physical}) == len(physical)
+                  expected = Counter((p['name'], p['version'], p['sha256']) for p in inventory)
+                  retained = Counter((p['name'], p['version'], p['sha256']) for p in physical)
+                  assert not (expected - retained)
+                  for package in physical:
+                      record = manifest['packages'][package['notice_package_index']]
+                      assert record['origin'] == 'verified deployment'
+                      assert (record['path'], record['name'], record['version']) == (package['path'], package['name'], package['version'])
+                      assert record['package_json_sha256']
+              if role in ['api', 'live', 'space']:
+                  node_license = (root / f'{role}-NODE_LICENSE').read_bytes()
+                  assert manifest['node']['version'] == 'v22.23.4'
+                  assert hashlib.sha256(node_license).hexdigest() == manifest['node']['sha256']
+                  assert node_license in notices
+          files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
+          (root / 'collection.json').write_text(json.dumps({
+              'source_commit': sys.argv[2], 'platform': 'linux/amd64',
+              'scanner_version': '1.55.0', 'files': files,
+              'registry_publication': False, 'license_approved': False,
+              'source_fulfillment_complete': False,
+              'scope': 'Actual local image config identities and conservative production-closure JS/codec notice bundles with qualified source-evidence gaps; not registry manifest subjects or license/source clearance'
+          }, indent=2) + '\n')
+          PYRECEIPT
+      - name: Retain metadata inventories for operator review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: plane-native-amd64-inventory-${{ github.sha }}
+          path: ${{ runner.temp }}/plane-native-inventory
+          if-no-files-found: error
+          retention-days: 7

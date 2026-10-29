@@ -6,7 +6,16 @@
 
 import { describe, expect, it } from "vitest";
 // utils
-import { formatMermaidError, getMermaidTheme, isMermaidLanguage, MERMAID_LANGUAGE } from "../src/editor/mermaid";
+import {
+  clampMermaidZoom,
+  formatMermaidError,
+  getMermaidTheme,
+  getNextMermaidZoom,
+  isMermaidLanguage,
+  MERMAID_LANGUAGE,
+  MERMAID_MAX_ZOOM,
+  MERMAID_MIN_ZOOM,
+} from "../src/editor/mermaid";
 
 describe("isMermaidLanguage", () => {
   it("should return true for the mermaid language", () => {
@@ -65,5 +74,23 @@ describe("formatMermaidError", () => {
     expect(formatMermaidError(undefined)).toBe("Unable to render the diagram. Please check the Mermaid syntax.");
     expect(formatMermaidError({})).toBe("Unable to render the diagram. Please check the Mermaid syntax.");
     expect(formatMermaidError(new Error())).toBe("Unable to render the diagram. Please check the Mermaid syntax.");
+  });
+});
+
+describe("Mermaid diagram zoom", () => {
+  it("should clamp zoom to the supported range", () => {
+    expect(clampMermaidZoom(25)).toBe(MERMAID_MIN_ZOOM);
+    expect(clampMermaidZoom(175)).toBe(175);
+    expect(clampMermaidZoom(500)).toBe(MERMAID_MAX_ZOOM);
+  });
+
+  it("should move in predictable 25 percent steps", () => {
+    expect(getNextMermaidZoom(100, "increase")).toBe(125);
+    expect(getNextMermaidZoom(100, "decrease")).toBe(75);
+  });
+
+  it("should stop at the minimum and maximum zoom", () => {
+    expect(getNextMermaidZoom(MERMAID_MIN_ZOOM, "decrease")).toBe(MERMAID_MIN_ZOOM);
+    expect(getNextMermaidZoom(MERMAID_MAX_ZOOM, "increase")).toBe(MERMAID_MAX_ZOOM);
   });
 });

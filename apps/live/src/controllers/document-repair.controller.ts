@@ -112,7 +112,7 @@ export class DocumentRepairController {
         return res.status(400).json({
           message: "Validation error",
           context: {
-            validationErrors: error.errors.map((validationError) => ({
+            validationErrors: error.issues.map((validationError) => ({
               path: validationError.path.join("."),
               message: validationError.message,
             })),
