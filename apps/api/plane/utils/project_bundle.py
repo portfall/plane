@@ -168,7 +168,7 @@ def collect_project_graph(database, workspace_id, project_id, identifier):
         workspace_id, project_id = str(UUID(workspace_id)), str(UUID(project_id))
     except (ValueError, TypeError, AttributeError):
         raise BundleRefused("INVALID_PROJECT_IDENTITY") from None
-    if identifier != "OBOT":
+    if not isinstance(identifier, str) or not PROJECT_IDENTIFIER.fullmatch(identifier):
         raise BundleRefused("INVALID_PROJECT_IDENTITY")
     registry = {model.__name__: model for model in apps.get_app_config("db").get_models()}
     selected = {kind: {} for kind in PROJECT_KINDS}
@@ -365,7 +365,7 @@ def _identity(database, instance, workspace_id, project_id, identifier):
         workspace_id, project_id = str(UUID(workspace_id)), str(UUID(project_id))
     except (ValueError, TypeError, AttributeError):
         raise BundleRefused("INVALID_PROJECT_IDENTITY") from None
-    if identifier != "OBOT":
+    if not isinstance(identifier, str) or not PROJECT_IDENTIFIER.fullmatch(identifier):
         raise BundleRefused("INVALID_PROJECT_IDENTITY")
     project = apps.get_model("db", "Project")
     if not _all(project, database).filter(pk=project_id, workspace_id=workspace_id, identifier=identifier).exists():
@@ -540,6 +540,9 @@ def _check_documents(rows, references, source_origin, target_origin):
 
 
 LEGACY_HTML_FIELDS = ("description_html", "comment_html")
+# A Plane project identifier (the work item prefix, OBOT in OBOT-289). The source keeps its own;
+# the target project keeps the identifier it was created with, and sequence numbers carry over.
+PROJECT_IDENTIFIER = re.compile(r"[A-Z][A-Z0-9]{0,11}")
 LINK_METADATA_KEYS = frozenset({"title", "favicon", "url", "favicon_url", "error"})
 
 
@@ -1056,7 +1059,10 @@ def _decode_bundle(database, bundle):
     }:
         raise BundleRefused("INVALID_PROJECT_IDENTITY")
     _origin(source["instance"])
-    if source["identifier"] != "OBOT" or not isinstance(source["workspace_slug"], str) or not source["workspace_slug"]:
+    if (
+        not isinstance(source["identifier"], str)
+        or not PROJECT_IDENTIFIER.fullmatch(source["identifier"])
+    ) or not isinstance(source["workspace_slug"], str) or not source["workspace_slug"]:
         raise BundleRefused("INVALID_PROJECT_IDENTITY")
     try:
         for name in ("workspace_id", "project_id"):
@@ -1297,7 +1303,9 @@ def _row_manifest(records):
 
 
 def _target_inventory(database, target):
-    rows, actors, excluded = collect_project_graph(database, target["workspace_id"], target["project_id"], "OBOT")
+    rows, actors, excluded = collect_project_graph(
+        database, target["workspace_id"], target["project_id"], target["identifier"]
+    )
     records, _blobs, _objects = _encode_rows(rows, include_objects=False)
     return rows, _row_manifest(records), excluded
 
@@ -1673,6 +1681,10 @@ def _mapped_rows(rows, actors, source, target, user_map):
                     row[field.attname] = remap(field.related_model.__name__, value)
             if kind == "Project":
                 row["id"] = target["project_id"]
+                # The target keeps the identifier it was created with (OBOT-289 becomes PF-289).
+                row["identifier"] = target["identifier"]
+            if kind == "ProjectIdentifier" and row["name"] == source["identifier"]:
+                row["name"] = target["identifier"]
             for name, reference_kind in HISTORY_FIELDS.get(kind, {}).items():
                 value = row[name]
                 row[name] = (
