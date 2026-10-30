@@ -1754,6 +1754,9 @@ def _exclusive_rows(database, current):
     from django.apps import apps
 
     selected = {kind: {str(row["id"]) for row in entries} for kind, entries in current.items() if kind != "Project"}
+    # The target's own root row is rewritten in the same transaction (its cover asset reference
+    # included), so it is not an external dependant.
+    owned = {kind: {str(row["id"]) for row in entries} for kind, entries in current.items()}
     for model in apps.get_app_config("db").get_models():
         for field in model._meta.concrete_fields:
             if field.is_relation and field.related_model.__name__ in selected:
@@ -1762,7 +1765,7 @@ def _exclusive_rows(database, current):
                     ids
                     and _all(model, database)
                     .filter(**{field.attname + "__in": ids})
-                    .exclude(pk__in=selected.get(model.__name__, set()))
+                    .exclude(pk__in=owned.get(model.__name__, set()))
                     .exists()
                 ):
                     raise BundleRefused("EXTERNAL_TARGET_REFERENCE")
@@ -1840,6 +1843,20 @@ def _prepare_import(database, bundle, target, user_map, administrator, baseline_
         if baseline_receipt_sha256 is not None:
             raise BundleRefused("BASELINE_RECEIPT_MISMATCH")
         baseline = None
+        root = current["Project"][0]
+        # Plane's create-project form uploads a cover: exactly the root's own PROJECT_COVER asset
+        # is part of an empty project. Like every root field, the import replaces it with the
+        # source's (the asset row is removed with the other bootstrap rows).
+        cover = [
+            row
+            for row in current.get("FileAsset", [])
+            if row["entity_type"] == "PROJECT_COVER"
+            and root["cover_image_asset_id"] is not None
+            and str(row["id"]) == str(root["cover_image_asset_id"])
+            and row["deleted_at"] is None
+        ]
+        if (root["cover_image_asset_id"] is not None and len(cover) != 1) or len(current.get("FileAsset", [])) != len(cover):
+            raise BundleRefused("TARGET_NOT_EMPTY")
         if any(
             entries
             for kind, entries in current.items()
@@ -1851,18 +1868,17 @@ def _prepare_import(database, bundle, target, user_map, administrator, baseline_
                 "ProjectPublicMember",
                 "State",
                 "ProjectUserProperty",
+                "FileAsset",
             }
         ):
             raise BundleRefused("TARGET_NOT_EMPTY")
         _check_bootstrap(current, user_map, administrator)
-        root = current["Project"][0]
         if any(
             root[name]
             for name in (
                 "description",
                 "description_html",
                 "description_text",
-                "cover_image_asset_id",
                 "estimate_id",
                 "archived_at",
                 "deleted_at",
