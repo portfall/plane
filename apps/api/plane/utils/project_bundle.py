@@ -22,7 +22,7 @@ import time
 CODEC_NODE = "/usr/local/bin/node"
 CODEC_PATH = "/code/project-bundle-codec.mjs"
 CODEC_FORMAT = "plane-project-document/1"
-CODEC_SUPPORT = "identity-only/1"
+CODEC_SUPPORT = "identity-literals/2"
 LEGACY_CODEC_FORMAT = "plane-project-legacy-document/1"
 MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
@@ -47,7 +47,8 @@ DraftIssueModule DraftIssueCycle Intake IntakeIssue ProjectDeployBoard ProjectPu
 """.split()
 )
 # These are explicitly out of the content contract; only counts are read.
-EXCLUDED_PROJECT_KINDS = frozenset({"Notification", "Importer"})
+# UserRecentVisit is per-user navigation history, not project content.
+EXCLUDED_PROJECT_KINDS = frozenset({"Notification", "Importer", "UserRecentVisit"})
 HISTORY_FIELDS = {
     "IssueVersion": {
         "parent": "Issue",
@@ -527,11 +528,39 @@ def _check_documents(rows, references, source_origin, target_origin):
                     and source_origin.casefold() in value.casefold()
                     and name not in {"url"}
                     and (pair is None or name not in pair)
+                    # A link's history follows _native_links' exact rule (rewritten or refused).
+                    and not (kind == "IssueActivity" and row.get("field") == "link" and name in {"old_value", "new_value"})
                 ):
                     raise BundleRefused("UNCLASSIFIED_SOURCE_URL:" + kind)
-                if isinstance(field, models.JSONField) and (pair is None or name not in pair):
+                if kind in {"IssueLink", "ModuleLink"} and name == "metadata":
+                    _check_link_metadata(kind, row, source_origin)
+                elif isinstance(field, models.JSONField) and (pair is None or name not in pair):
                     opaque(row[name])
     return checks
+
+
+LEGACY_HTML_FIELDS = ("description_html", "comment_html")
+LINK_METADATA_KEYS = frozenset({"title", "favicon", "url", "favicon_url", "error"})
+
+
+def _check_link_metadata(kind, row, source_origin):
+    """A link's preview, as Plane's crawler stores it: the link's own URL, an inline favicon and
+    literal text. Its url follows the link's rewrite; nothing else may name the source instance."""
+    value = row["metadata"]
+    if not isinstance(value, dict) or not set(value) <= LINK_METADATA_KEYS:
+        raise BundleRefused("UNCLASSIFIED_JSON_REFERENCE:" + kind)
+    if "url" in value and value["url"] != row["url"]:
+        raise BundleRefused("UNCLASSIFIED_JSON_REFERENCE:" + kind)
+    favicon = value.get("favicon")
+    if favicon is not None and not (isinstance(favicon, str) and favicon.startswith("data:image/")):
+        raise BundleRefused("UNCLASSIFIED_JSON_REFERENCE:" + kind)
+    for name in ("title", "favicon_url", "error"):
+        text = value.get(name)
+        if text is not None and (not isinstance(text, str) or source_origin.casefold() in text.casefold()):
+            raise BundleRefused("UNCLASSIFIED_JSON_REFERENCE:" + kind)
+    favicon_url = value.get("favicon_url")
+    if favicon_url is not None and not favicon_url.startswith("https://"):
+        raise BundleRefused("UNCLASSIFIED_JSON_REFERENCE:" + kind)
 
 
 def _encode_rows(rows, *, include_objects):
@@ -1748,15 +1777,39 @@ def _prepare_import(database, bundle, target, user_map, administrator, baseline_
         raise BundleRefused("SOURCE_DESTINATION_IDENTITY_COLLISION")
     # Inspect ORIGINAL documents against the complete destination identity map.
     # No re-encoding/current-JSON fallback can erase retained references.
-    checks = _check_documents(
-        rows, _codec_references(rows, actors, user_map, source, target), source["instance"], target["instance"]
-    )
     links, link_values = _native_links(rows, source, target)
+    # Documents are inspected as they will be written: original, except rewritten anchors.
+    checked = {
+        kind: [
+            {
+                **row,
+                **{
+                    name: link_values[(kind, str(row["id"]), name)]
+                    for name in LEGACY_HTML_FIELDS
+                    if (kind, str(row["id"]), name) in link_values
+                },
+            }
+            for row in entries
+        ]
+        for kind, entries in rows.items()
+    }
+    checks = _check_documents(
+        checked, _codec_references(rows, actors, user_map, source, target), source["instance"], target["instance"]
+    )
     checks.extend(links)
     mapped, audit = _mapped_rows(rows, actors, source, target, user_map)
     for kind in ("IssueLink", "ModuleLink"):
         for row in mapped[kind]:
             row["url"] = link_values[(kind, str(row["id"]))]
+            # The crawler's preview records the same URL (_check_link_metadata requires equality).
+            if isinstance(row.get("metadata"), dict) and "url" in row["metadata"]:
+                row["metadata"] = {**row["metadata"], "url": row["url"]}
+    for kind, entries in mapped.items():
+        for row in entries:
+            for name in ("old_value", "new_value", *LEGACY_HTML_FIELDS):
+                key = (kind, str(row["id"]), name)
+                if key in link_values:
+                    row[name] = link_values[key]
     current, current_manifest, excluded = _target_inventory(database, target)
     previous = (
         apps.get_model("db", "ProjectMigrationRun")
@@ -1797,7 +1850,6 @@ def _prepare_import(database, bundle, target, user_map, administrator, baseline_
                 "description",
                 "description_html",
                 "description_text",
-                "cover_image",
                 "cover_image_asset_id",
                 "estimate_id",
                 "archived_at",
@@ -2204,79 +2256,132 @@ def schema_profile(database):
 def _native_links(rows, source, target):
     """Only the exact native Page route in standalone URL fields may change.
 
-    Bound to apps/web/core/store/pages/project-page.ts::redirect_url and the
-    existing project Page route. This never edits HTML, JSON or Yjs history.
-    Signed/credential-bearing URLs, unknown native routes and foreign Pages
-    refuse instead of retaining an authenticated source link.
+    Bound to apps/web/core/store/pages/project-page.ts::redirect_url, the
+    existing project Page route and the work item route /<slug>/browse/<ID>-<n>/.
+    Beyond URL fields, only an exact double-quoted href to one of those routes in a
+    legacy (HTML-only) document changes; JSON and Yjs history are never edited.
+    Signed/credential-bearing URLs, unknown native routes and foreign Pages or work
+    items refuse instead of retaining an authenticated source link.
     """
+    import re
     from urllib.parse import urlsplit
     from uuid import UUID
 
     checks, values = [], {}
     pages = {str(row["id"]) for row in rows["Page"]}
+    sequences = {str(row["sequence_id"]) for row in rows.get("Issue", [])}
+
+    def rewrite(original, kind):
+        try:
+            parsed = urlsplit(original)
+            if (
+                parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or parsed.scheme not in {"", "https"}
+            ):
+                raise ValueError()
+            internal = (
+                not parsed.netloc or parsed.netloc.casefold() == urlsplit(source["instance"]).netloc.casefold()
+            )
+            if parsed.netloc and not parsed.scheme:
+                raise ValueError()
+            if internal:
+                pieces = parsed.path.split("/")
+                trailing = pieces[-1] == ""
+                if trailing:
+                    pieces = pieces[:-1]
+                prefix, issue = source["identifier"] + "-", pieces[3] if len(pieces) == 4 else ""
+                if pieces[:3] == ["", source["workspace_slug"], "browse"] and len(pieces) == 4:
+                    if not (
+                        issue.startswith(prefix)
+                        and issue[len(prefix) :].isdigit()
+                        and issue[len(prefix) :] in sequences
+                    ):
+                        raise ValueError()
+                    route = "/browse/" + target["identifier"] + "-" + issue[len(prefix) :]
+                    support = "native-issue-url/1"
+                elif (
+                    len(pieces) != 6
+                    or pieces[:5] != ["", source["workspace_slug"], "projects", source["project_id"], "pages"]
+                    or str(UUID(pieces[5])) != pieces[5]
+                    or pieces[5] not in pages
+                ):
+                    raise ValueError()
+                else:
+                    route = "/projects/" + target["project_id"] + "/pages/" + pieces[5]
+                    support = "native-page-url/1"
+                rewritten = (
+                    (target["instance"] if parsed.netloc else "")
+                    + "/"
+                    + target["workspace_slug"]
+                    + route
+                    + ("/" if trailing else "")
+                )
+            else:
+                if not parsed.hostname or source["instance"].casefold() in original.casefold():
+                    raise ValueError()
+                rewritten = original
+                support = "external-plain-url/1"
+        except (ValueError, TypeError):
+            raise BundleRefused("UNSUPPORTED_NATIVE_LINK:" + kind) from None
+        return support, rewritten
+
+    def record(kind, pk, field, original, support, rewritten):
+        checks.append(
+            dict(
+                kind=kind,
+                pk=pk,
+                field=field,
+                result=dict(
+                    support=support,
+                    before_sha256=sha256(original.encode()),
+                    after_sha256=sha256(rewritten.encode()),
+                    original=original,
+                    target=rewritten,
+                ),
+            )
+        )
+
     for kind in ("IssueLink", "ModuleLink"):
         for row in rows[kind]:
             original = row["url"]
             if not isinstance(original, str) or not original:
                 raise BundleRefused("UNSUPPORTED_NATIVE_LINK")
-            try:
-                parsed = urlsplit(original)
-                if (
-                    parsed.username
-                    or parsed.password
-                    or parsed.query
-                    or parsed.fragment
-                    or parsed.scheme not in {"", "https"}
-                ):
-                    raise ValueError()
-                internal = (
-                    not parsed.netloc or parsed.netloc.casefold() == urlsplit(source["instance"]).netloc.casefold()
-                )
-                if parsed.netloc and not parsed.scheme:
-                    raise ValueError()
-                if internal:
-                    pieces = parsed.path.split("/")
-                    trailing = pieces[-1] == ""
-                    if trailing:
-                        pieces = pieces[:-1]
-                    if (
-                        len(pieces) != 6
-                        or pieces[:5] != ["", source["workspace_slug"], "projects", source["project_id"], "pages"]
-                        or str(UUID(pieces[5])) != pieces[5]
-                        or pieces[5] not in pages
-                    ):
-                        raise ValueError()
-                    rewritten = (
-                        (target["instance"] if parsed.netloc else "")
-                        + "/"
-                        + target["workspace_slug"]
-                        + "/projects/"
-                        + target["project_id"]
-                        + "/pages/"
-                        + pieces[5]
-                        + ("/" if trailing else "")
-                    )
-                else:
-                    if not parsed.hostname or source["instance"].casefold() in original.casefold():
-                        raise ValueError()
-                    rewritten = original
-            except (ValueError, TypeError):
-                raise BundleRefused("UNSUPPORTED_NATIVE_LINK:" + kind) from None
+            support, rewritten = rewrite(original, kind)
             values[(kind, str(row["id"]))] = rewritten
-            checks.append(
-                dict(
-                    kind=kind,
-                    pk=str(row["id"]),
-                    field="url",
-                    result=dict(
-                        support="native-page-url/1" if internal else "external-plain-url/1",
-                        before_sha256=sha256(original.encode()),
-                        after_sha256=sha256(rewritten.encode()),
-                        original=original,
-                        target=rewritten,
-                    ),
-                )
-            )
+            record(kind, str(row["id"]), "url", original, support, rewritten)
+    # A link's activity history records the same URL; it follows exactly the same rule, so the
+    # history never keeps a link to the source instance and never changes anything else.
+    for row in rows.get("IssueActivity", []):
+        if row.get("field") != "link":
+            continue
+        for name in ("old_value", "new_value"):
+            original = row.get(name)
+            if not isinstance(original, str) or not original or ("://" not in original and not original.startswith("/")):
+                continue
+            support, rewritten = rewrite(original, "IssueActivity")
+            values[("IssueActivity", str(row["id"]), name)] = rewritten
+            record("IssueActivity", str(row["id"]), name, original, support, rewritten)
+    # A legacy document's anchors to the source instance follow the same rule, one exact
+    # href="..." at a time; the codec then refuses any other mention of the source.
+    netloc = urlsplit(source["instance"]).netloc.casefold()
+    for kind, entries in sorted(rows.items()):
+        for row in entries:
+            for name in LEGACY_HTML_FIELDS:
+                html = row.get(name)
+                if not isinstance(html, str) or netloc not in html.casefold():
+                    continue
+                updated = html
+                for original in dict.fromkeys(re.findall(r'href="([^"]*)"', html)):
+                    if urlsplit(original).netloc.casefold() != netloc:
+                        continue
+                    support, rewritten = rewrite(original, kind)
+                    updated = updated.replace(f'href="{original}"', f'href="{rewritten}"')
+                    record(kind, str(row["id"]), name + "#href", original, support, rewritten)
+                if updated != html:
+                    values[(kind, str(row["id"]), name)] = updated
     return checks, values
 
 

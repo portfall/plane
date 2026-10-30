@@ -66,6 +66,37 @@ describe("project bundle legacy fields with exact native schemas", () => {
     expect(result.references).toContainEqual(expect.objectContaining({ kind: "asset", source: ASSET, target: ASSET }));
     await expect(inspectProjectBundleLegacyDocument(legacy(`<p><a href="${SOURCE}/private/">Source</a></p>`))).rejects.toThrow(ProjectBundleDocumentError);
   });
+  it("keeps table cell colours but refuses a cell background that loads anything", async () => {
+    const cell = (background: string) => legacy(`<table><tbody><tr><th background="${background}"><p>H</p></th></tr></tbody></table>`);
+    for (const background of ["none", "#e5e7eb", "rgba(0, 0, 0, 0.1)", "var(--background-color-layer-1)"]) {
+      const value = cell(background);
+      expect((await inspectProjectBundleLegacyDocument(value)).html_base64).toBe(value.html_base64);
+    }
+    for (const background of ["https://external.invalid/x.png", "/uploads/x.png", "x.png", "url(x.png)"]) {
+      await expect(inspectProjectBundleLegacyDocument(cell(background))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+  });
+  it("keeps presentational legacy styles but refuses escapes, loaders and script links", async () => {
+    const value = legacy('<p style="text-align: center; color: #333">x</p>');
+    expect((await inspectProjectBundleLegacyDocument(value)).html_base64).toBe(value.html_base64);
+    for (const html of [
+      '<p style="background: u\\72l(https://x.invalid/a.png)">x</p>',
+      '<p style="background-image: image-set(\'x.png\' 1x)">x</p>',
+      '<p style="position: fixed">x</p>',
+      '<p><a href="javascript:alert(1)">x</a></p>',
+      '<p><a href="evil.invalid/x">x</a></p>',
+      '<p title="\\0075rl(x)">x</p>',
+    ]) {
+      await expect(inspectProjectBundleLegacyDocument(legacy(html))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+  });
+  it("retains external legacy links but refuses relative links and styled url() loads", async () => {
+    const value = legacy('<p><a href="https://forge.example.invalid/org/repo/pulls/7">PR 7</a></p>');
+    expect((await inspectProjectBundleLegacyDocument(value)).html_base64).toBe(value.html_base64);
+    for (const html of ['<p><a href="/uploads/private-asset">Asset</a></p>', '<p><span style="background-image: url(https://external.invalid/x.png)">x</span></p>']) {
+      await expect(inspectProjectBundleLegacyDocument(legacy(html))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+  });
 });
 const inspect = (bytes: Uint8Array) => inspectProjectBundleDocument(request(bytes));
 const retainDeleted = (html: string) => {
@@ -91,7 +122,7 @@ describe("project bundle identity-only offline codec", async () => {
   it("preserves original binary, retained payload and replay behavior without re-encoding", async () => {
     const { before, after } = retainDeleted("<p>Retained deleted history 雪</p>");
     const result = await inspect(after);
-    expect(result.support).toBe("identity-only/1");
+    expect(result.support).toBe("identity-literals/2");
     expect(result.binary).toBe(Buffer.from(after).toString("base64"));
     expect(result.before_sha256).toBe(createHash("sha256").update(after).digest("hex"));
     expect(result.after_sha256).toBe(result.before_sha256);
@@ -139,13 +170,25 @@ describe("project bundle identity-only offline codec", async () => {
     for (const bytes of [binary(html), retainDeleted(html).after]) await refused(request(bytes), "ORIGIN_REWRITE_REQUIRED");
   });
 
-  it("refuses unclassified external or relative links and opaque URL-bearing attributes", async () => {
-    for (const href of ["https://unclassified.invalid/private-asset", "/uploads/private-asset"]) {
+  it("retains external links, URLs and UUIDs in text as literals, byte for byte", async () => {
+    const html = `<p>See <a href="https://forge.example.invalid/org/repo/pulls/7" target="_blank" rel="noopener">PR 7</a> and run 5f0c2a4e-1b2c-4d3e-8f90-a1b2c3d4e5f6 at https://ci.example.invalid/runs/1.</p><pre><code spellcheck="false">background: url(x.png)</code></pre>`;
+    for (const bytes of [binary(html), retainDeleted(html).after]) {
+      const value = request(bytes);
+      const result = await inspectProjectBundleDocument(value);
+      expect(result.binary).toBe(value.binary);
+      expect(result.references).toEqual([]);
+    }
+    const value = request(binary(`<image-component src="${ASSET}" alt="https://external.invalid/screenshot"></image-component>`));
+    value.references = [{ kind: "asset", source: ASSET, target: ASSET }];
+    expect((await inspectProjectBundleDocument(value)).binary).toBe(value.binary);
+  });
+
+  it("refuses relative links and the source instance named by host alone", async () => {
+    for (const href of ["/uploads/private-asset", "./private-asset", " /api/assets/x"]) {
       await refused(request(binary(`<p><a href="${href}">Asset</a></p>`)), "UNCLASSIFIED_REFERENCE");
     }
-    const value = request(binary(`<image-component src="${ASSET}" alt="https://unclassified.invalid/private-asset"></image-component>`));
-    value.references = [{ kind: "asset", source: ASSET, target: ASSET }];
-    await refused(value, "UNCLASSIFIED_REFERENCE");
+    await refused(request(binary(`<p>Moved from source.invalid/workspace/projects/x/issues today</p>`)), "ORIGIN_REWRITE_REQUIRED");
+    await refused(request(binary(`<p><a href="HTTPS://SOURCE.INVALID/workspace/pages/">Source Page</a></p>`)), "ORIGIN_REWRITE_REQUIRED");
   });
 
   it("refuses changed user mentions and project/workspace embeds", async () => {
@@ -172,6 +215,73 @@ describe("project bundle identity-only offline codec", async () => {
     }
   });
 
+  it("keeps the interactive editor's block ids and list tightness, and nothing like them elsewhere", async () => {
+    const edited = (change: (body: Y.XmlFragment) => void) => {
+      const doc = new Y.Doc({ gc: false });
+      Y.applyUpdate(doc, binary("<p>Body</p><ul><li><p>Item</p></li></ul>"));
+      change(doc.getXmlFragment("default"));
+      const bytes = Y.encodeStateAsUpdate(doc);
+      doc.destroy();
+      return bytes;
+    };
+    const kept = edited((body) => {
+      (body.get(0) as Y.XmlElement).setAttribute("id", OTHER);
+      (body.get(1) as Y.XmlElement).setAttribute("id", ACTOR);
+      (body.get(1) as Y.XmlElement).setAttribute("tight" as string, true as unknown as string);
+    });
+    const value = request(kept);
+    const result = await inspectProjectBundleDocument(value);
+    expect(result.binary).toBe(value.binary);
+    expect(result.references).toEqual([]);
+    for (const change of [
+      (body: Y.XmlFragment) => (body.get(0) as Y.XmlElement).setAttribute("id", "https://source.invalid/x"),
+      (body: Y.XmlFragment) => (body.get(0) as Y.XmlElement).setAttribute("tight" as string, true as unknown as string),
+      (body: Y.XmlFragment) => (body.get(1) as Y.XmlElement).setAttribute("tight", "yes"),
+    ]) {
+      await expect(inspect(edited(change))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+  });
+
+  it("refuses script links and cell colours that would load anything", async () => {
+    const linked = (href: string) => {
+      const doc = new Y.Doc({ gc: false });
+      Y.applyUpdate(doc, binary("<p>Body</p>"));
+      ((doc.getXmlFragment("default").get(0) as Y.XmlElement).get(0) as Y.XmlText).format(0, 4, { link: { href } });
+      const bytes = Y.encodeStateAsUpdate(doc);
+      doc.destroy();
+      return bytes;
+    };
+    expect((await inspect(linked("https://forge.example.invalid/org/repo"))).references).toEqual([]);
+    for (const href of ["javascript:alert(1)", " JaVaScRiPt:alert(1)", "data:text/html,x", "\\\\evil.invalid/x", "evil.invalid/x"]) {
+      await expect(inspect(linked(href))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+    const table = (colour: string) => {
+      const doc = new Y.Doc({ gc: false });
+      Y.applyUpdate(doc, binary("<table><tbody><tr><td><p>C</p></td></tr></tbody></table>"));
+      const cell = ((doc.getXmlFragment("default").get(0) as Y.XmlElement).get(0) as Y.XmlElement).get(0) as Y.XmlElement;
+      cell.setAttribute("background", colour);
+      const bytes = Y.encodeStateAsUpdate(doc);
+      doc.destroy();
+      return bytes;
+    };
+    expect((await inspect(table("#e5e7eb"))).references).toEqual([]);
+    const coloured = (color: string) => {
+      const doc = new Y.Doc({ gc: false });
+      Y.applyUpdate(doc, binary("<p>Body</p>"));
+      ((doc.getXmlFragment("default").get(0) as Y.XmlElement).get(0) as Y.XmlText).format(0, 4, { customColor: { color, backgroundColor: null } });
+      const bytes = Y.encodeStateAsUpdate(doc);
+      doc.destroy();
+      return bytes;
+    };
+    expect((await inspect(coloured("var(--editor-colors-peach-text)"))).references).toEqual([]);
+    for (const color of ["red; position: fixed; inset: 0", "red;background:red"]) {
+      await expect(inspect(coloured(color))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+    for (const colour of ["red; background-image: url(https://x.invalid/a.png)", "red; background-image: image-set(\"x.png\" 1x)", "u\\72l(x)"]) {
+      await expect(inspect(table(colour))).rejects.toThrow(ProjectBundleDocumentError);
+    }
+  });
+
   it("refuses an incomplete update with unresolved predecessor structs", async () => {
     const doc = new Y.Doc({ gc: false });
     Y.applyUpdate(doc, binary("<p>Body</p>"));
@@ -193,7 +303,7 @@ describe("project bundle identity-only offline codec", async () => {
     const run = (input: string) => spawnSync(process.execPath, ["--max-old-space-size=256", cli], { input, encoding: "utf8", env: {}, timeout: 15000, maxBuffer: 48 * 1024 * 1024 });
     const accepted = run(JSON.stringify(request()));
     expect(accepted.status).toBe(0);
-    expect(JSON.parse(accepted.stdout).support).toBe("identity-only/1");
+    expect(JSON.parse(accepted.stdout).support).toBe("identity-literals/2");
     expect(JSON.parse(accepted.stdout).schema_sha256).toBe((await inspectProjectBundleDocument(request())).schema_sha256);
     const rejected = run(JSON.stringify({ ...request(), binary: "SYNTHETIC_PRIVATE_NEVER_PRINT" }));
     expect(rejected.status).toBe(2);

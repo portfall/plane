@@ -48,7 +48,7 @@ def inspect(**overrides):
 class TestInstalledNativeCodec(unittest.TestCase):
     def test_exact_bytes_hash_and_codec_schema_are_verified_across_real_process(self):
         result = inspect()
-        self.assertEqual(result["support"], "identity-only/1")
+        self.assertEqual(result["support"], "identity-literals/2")
         self.assertEqual(base64.b64decode(result["binary"]), BINARY)
         self.assertEqual(result["before_sha256"], bundle.sha256(BINARY))
         self.assertEqual(result["after_sha256"], bundle.sha256(BINARY))

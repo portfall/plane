@@ -11,18 +11,68 @@ import { generateJSON } from "@tiptap/html";
 import type { Schema } from "@tiptap/pm/model";
 import { yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
+import { BLOCK_NODE_TYPES } from "@/constants/extension";
+import { ADDITIONAL_BLOCK_NODE_TYPES } from "@/plane-editor/constants/extensions";
 import { CoreEditorExtensionsWithoutProps, DocumentEditorExtensionsWithoutProps } from "../extensions/core-without-props";
 import { TitleExtensions } from "../extensions/title-extension";
 
 export const PROJECT_BUNDLE_DOCUMENT_FORMAT = "plane-project-document/1";
-export const PROJECT_BUNDLE_DOCUMENT_SUPPORT = "identity-only/1";
+export const PROJECT_BUNDLE_DOCUMENT_SUPPORT = "identity-literals/2";
 export const PROJECT_BUNDLE_LEGACY_FORMAT = "plane-project-legacy-document/1";
 export const PROJECT_BUNDLE_MAX_BYTES = 10 * 1024 * 1024;
 const MAX_STRUCTS = 100_000;
 const MAX_REFERENCES = 20_000;
 const kinds = new Set(["asset", "user", "issue", "page", "project", "workspace"]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const embeddedUUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+// Literal text may contain external URLs and UUIDs (for example links to other systems); anything
+// naming the source instance, by origin or by bare host, still refuses until it is rewritten.
+// Plane's interactive editor has two extensions the server-side schema lacks: UniqueID gives each
+// block a random UUID `id`, and tiptap-markdown flags lists `tight`. Neither refers to anything.
+const uniqueIdNodes = new Set<string>([...BLOCK_NODE_TYPES, ...ADDITIONAL_BLOCK_NODE_TYPES]);
+const editorAttribute = (node: string, key: string, value: unknown): boolean =>
+  (key === "id" && uniqueIdNodes.has(node) && (value === null || (typeof value === "string" && uuid.test(value)))) ||
+  (key === "tight" && (node === "bulletList" || node === "orderedList") && (value === null || typeof value === "boolean"));
+// Attribute values become HTML attributes and, for colours and styles, CSS: none may load a
+// resource, so no fetching CSS function, @import or escape (which could spell one) is accepted.
+const cssInert = (value: string): boolean => !/(?:url|image-set|image|src|element|cross-fade|expression)\s*\(|@import|\\/i.test(value);
+const inertAttribute = (value: unknown, depth = 0): boolean =>
+  depth < 64 &&
+  (typeof value === "string" ? cssInert(value)
+    : Array.isArray(value) ? value.every((child) => inertAttribute(child, depth + 1))
+    : object(value) ? Object.values(value).every((child) => inertAttribute(child, depth + 1))
+    : true);
+// A colour as Plane writes it. Plane renders these attributes into style (custom colour marks
+// and table cells, headers and rows), and the obsolete HTML `background` attribute would load a
+// URL, so each must be a single colour value: never another declaration.
+const colour = (value: string): boolean =>
+  /^(none|transparent|#[0-9a-f]{3,8}|[a-z][a-z0-9-]*|(rgb|rgba|hsl|hsla)\([0-9.,%\s]+\)|var\(--[a-z0-9-]+\))$/i.test(value.trim());
+const styleAttributes = new Set(["color", "backgroundColor", "background", "textColor"]);
+const styleColour = (key: string, value: unknown): boolean =>
+  !styleAttributes.has(key) || value === null || (typeof value === "string" && colour(value));
+const styleColours = (attrs: Record<string, unknown>): boolean => Object.entries(attrs).every(([key, value]) => styleColour(key, value));
+// A link may only lead to the web or to mail, parsed as a browser does; relative, scheme-less and
+// script URLs refuse.
+const safeHref = (value: unknown): boolean => {
+  if (value === null || value === undefined) return true;
+  if (typeof value !== "string") return false;
+  try {
+    return ["https:", "http:", "mailto:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+};
+// Legacy inline styles: only presentational properties with plain values.
+const safeStyle = (value: string): boolean =>
+  value.split(";").every((declaration) => {
+    if (!declaration.trim()) return true;
+    const [property, ...rest] = declaration.split(":");
+    return rest.length === 1 && ["color", "background-color", "text-align", "width", "min-width"].includes(property.trim().toLowerCase()) &&
+      /^[#a-z0-9(),.%\s-]*$/i.test(rest[0]) && cssInert(rest[0]);
+  });
+const namesSource = (value: string, sourceOrigin: string): boolean => {
+  const lowered = value.toLowerCase();
+  return lowered.includes(sourceOrigin.toLowerCase()) || lowered.includes(new URL(sourceOrigin).host.toLowerCase());
+};
 const nodes = new Set("doc text paragraph heading blockquote bulletList orderedList listItem taskList taskItem codeBlock hardBreak horizontalRule image imageComponent mention emoji calloutComponent table tableRow tableCell tableHeader issue-embed-component".split(" "));
 const marks = new Set("bold italic strike code underline textStyle customColor link".split(" "));
 
@@ -89,8 +139,7 @@ export async function inspectProjectBundleLegacyDocument(input: ProjectBundleLeg
     const literal = (value: unknown, depth = 0): void => {
       requireDocument(depth < 64, "LIMIT_EXCEEDED");
       if (typeof value === "string") {
-        requireDocument(input.source_origin === input.target_origin || !value.includes(input.source_origin), "ORIGIN_REWRITE_REQUIRED");
-        requireDocument(!embeddedUUID.test(value) && !/[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/url\s*\(/i.test(value), "UNCLASSIFIED_REFERENCE");
+        requireDocument(input.source_origin === input.target_origin || !namesSource(value, input.source_origin), "ORIGIN_REWRITE_REQUIRED");
       } else if (Array.isArray(value)) for (const child of value) literal(child, depth + 1);
       else if (object(value)) for (const child of Object.values(value)) literal(child, depth + 1);
       else requireDocument(value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)), "UNSUPPORTED_HISTORY");
@@ -98,7 +147,7 @@ export async function inspectProjectBundleLegacyDocument(input: ProjectBundleLeg
     const reference = (kind: Kind, value: unknown, location: string) => {
       if (value === null || value === undefined || value === "") return;
       requireDocument(typeof value === "string", "UNCLASSIFIED_REFERENCE");
-      requireDocument(input.source_origin === input.target_origin || !value.includes(input.source_origin), "ORIGIN_REWRITE_REQUIRED");
+      requireDocument(input.source_origin === input.target_origin || !namesSource(value, input.source_origin), "ORIGIN_REWRITE_REQUIRED");
       const target = mappings.get(`${kind}/${value}`);
       requireDocument(target !== undefined, "UNMAPPED_REFERENCE");
       requireDocument(target === value, "REFERENCE_REWRITE_REQUIRED");
@@ -113,7 +162,8 @@ export async function inspectProjectBundleLegacyDocument(input: ProjectBundleLeg
       if (value.attrs !== undefined && value.attrs !== null) {
         requireDocument(object(value.attrs), "INVALID_DOCUMENT");
         for (const [key, attr] of Object.entries(value.attrs)) {
-          requireDocument(Object.hasOwn(schema.nodes[value.type].spec.attrs ?? {}, key), "UNKNOWN_ATTRIBUTE");
+          requireDocument(Object.hasOwn(schema.nodes[value.type].spec.attrs ?? {}, key) || editorAttribute(value.type, key, attr), "UNKNOWN_ATTRIBUTE");
+          requireDocument(inertAttribute(attr) && styleColour(key, attr), "UNCLASSIFIED_REFERENCE");
           if (["image", "imageComponent"].includes(value.type) && key === "src") reference("asset", attr, `${location}/src`);
           else if (["mention", "issue-embed-component"].includes(value.type) && key === "entity_identifier") {
             const kind = value.attrs.entity_name;
@@ -136,7 +186,8 @@ export async function inspectProjectBundleLegacyDocument(input: ProjectBundleLeg
             requireDocument(object(mark.attrs), "INVALID_DOCUMENT");
             for (const key of Object.keys(mark.attrs)) requireDocument(Object.hasOwn(schema.marks[mark.type].spec.attrs ?? {}, key), "UNKNOWN_ATTRIBUTE");
             literal(mark.attrs);
-            if (mark.type === "link") requireDocument(!mark.attrs.href, "UNCLASSIFIED_REFERENCE");
+            requireDocument(inertAttribute(mark.attrs) && styleColours(mark.attrs), "UNCLASSIFIED_REFERENCE");
+            if (mark.type === "link") requireDocument(safeHref(mark.attrs.href), "UNCLASSIFIED_REFERENCE");
           }
         }
       }
@@ -147,7 +198,7 @@ export async function inspectProjectBundleLegacyDocument(input: ProjectBundleLeg
     };
     let elements = 0;
     const tags = new Set("p h1 h2 h3 h4 h5 h6 blockquote ul ol li pre code br hr img image-component mention-component issue-embed-component span em strong b i u s del strike a table thead tbody tfoot tr td th div label input".split(" "));
-    const attributes = new Set("id data-id class style title alt src href target rel width height aspectratio alignment status entity_identifier entity_name project_identifier workspace_identifier data-type data-checked data-color checked type color colspan rowspan colwidth scope start textalign".split(" "));
+    const attributes = new Set("id data-id class style background spellcheck title alt src href target rel width height aspectratio alignment status entity_identifier entity_name project_identifier workspace_identifier data-type data-checked data-color checked type color colspan rowspan colwidth scope start textalign".split(" "));
     const guardElement = (element: HTMLElement, depth = 0): void => {
       requireDocument(depth < 64 && elements++ < MAX_STRUCTS, "LIMIT_EXCEEDED");
       const tag = element.tagName.toLowerCase();
@@ -155,7 +206,10 @@ export async function inspectProjectBundleLegacyDocument(input: ProjectBundleLeg
       for (const attr of Array.from(element.attributes)) {
         const key = attr.name.toLowerCase();
         requireDocument(attributes.has(key), "UNKNOWN_ATTRIBUTE");
-        if (key === "href") { literal(attr.value); requireDocument(!attr.value, "UNCLASSIFIED_REFERENCE"); }
+        requireDocument(cssInert(attr.value), "UNCLASSIFIED_REFERENCE");
+        if (key === "href") { literal(attr.value); requireDocument(safeHref(attr.value), "UNCLASSIFIED_REFERENCE"); }
+        else if (key === "style") { literal(attr.value); requireDocument(safeStyle(attr.value), "UNCLASSIFIED_REFERENCE"); }
+        else if (["background", "color", "data-color"].includes(key)) requireDocument(colour(attr.value), "UNCLASSIFIED_REFERENCE");
         else if ((tag === "image-component" || tag === "img") && key === "src") reference("asset", attr.value, `html/${elements}/src`);
         else if ((tag === "mention-component" || tag === "issue-embed-component") && key === "entity_identifier") {
           const kind = element.getAttribute("entity_name");
@@ -295,9 +349,7 @@ async function inspect(input: ProjectBundleDocumentRequest) {
     const literal = (value: unknown, depth = 0): void => {
       requireDocument(depth < 64, "LIMIT_EXCEEDED");
       if (typeof value === "string") {
-        requireDocument(input.source_origin === input.target_origin || !value.includes(input.source_origin), "ORIGIN_REWRITE_REQUIRED");
-        requireDocument(!embeddedUUID.test(value), "UNCLASSIFIED_REFERENCE");
-        requireDocument(!/[a-z][a-z0-9+.-]*:\/\//i.test(value) && !/url\s*\(/i.test(value), "UNCLASSIFIED_REFERENCE");
+        requireDocument(input.source_origin === input.target_origin || !namesSource(value, input.source_origin), "ORIGIN_REWRITE_REQUIRED");
       } else if (Array.isArray(value)) for (const child of value) literal(child, depth + 1);
       else if (object(value)) for (const child of Object.values(value)) literal(child, depth + 1);
       else requireDocument(value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)), "UNSUPPORTED_HISTORY");
@@ -305,7 +357,7 @@ async function inspect(input: ProjectBundleDocumentRequest) {
     const reference = (kind: Kind, source: unknown, item: Y.Item, location: string) => {
       if (source === null || source === undefined || source === "") return;
       requireDocument(typeof source === "string", "UNCLASSIFIED_REFERENCE");
-      requireDocument(input.source_origin === input.target_origin || !source.includes(input.source_origin), "ORIGIN_REWRITE_REQUIRED");
+      requireDocument(input.source_origin === input.target_origin || !namesSource(source, input.source_origin), "ORIGIN_REWRITE_REQUIRED");
       const target = mappings.get(`${kind}/${source}`);
       requireDocument(target !== undefined, "UNMAPPED_REFERENCE");
       requireDocument(target === source, "REFERENCE_REWRITE_REQUIRED");
@@ -349,10 +401,11 @@ async function inspect(input: ProjectBundleDocumentRequest) {
         requireDocument(parent instanceof Y.XmlElement && typeof raw.parentSub === "string", "UNSUPPORTED_HISTORY");
         const name = parent.nodeName;
         requireDocument(nodes.has(name) && !!nativeSchema.nodes[name], "UNKNOWN_TYPE");
-        requireDocument(Object.hasOwn((nativeSchema.nodes[name].spec.attrs ?? {}), raw.parentSub), "UNKNOWN_ATTRIBUTE");
+        requireDocument(Object.hasOwn((nativeSchema.nodes[name].spec.attrs ?? {}), raw.parentSub) || editorAttribute(name, raw.parentSub, content.getContent()[0]), "UNKNOWN_ATTRIBUTE");
         const values = content.getContent();
         requireDocument(values.length === 1, "UNSUPPORTED_HISTORY");
         const value = values[0];
+        requireDocument(inertAttribute(value) && styleColour(raw.parentSub, value), "UNCLASSIFIED_REFERENCE");
         if ((name === "imageComponent" || name === "image") && raw.parentSub === "src") reference("asset", value, item, location);
         else if ((name === "mention" || name === "issue-embed-component") && raw.parentSub === "entity_identifier") {
           const values = entityKinds.get(parent);
@@ -371,7 +424,8 @@ async function inspect(input: ProjectBundleDocumentRequest) {
           requireDocument(object(content.value), "UNSUPPORTED_HISTORY");
           for (const key of Object.keys(content.value)) requireDocument(Object.hasOwn((nativeSchema.marks[content.key].spec.attrs ?? {}), key), "UNKNOWN_ATTRIBUTE");
           literal(content.value);
-          if (content.key === "link") requireDocument(!content.value.href, "UNCLASSIFIED_REFERENCE");
+          requireDocument(inertAttribute(content.value) && styleColours(content.value), "UNCLASSIFIED_REFERENCE");
+          if (content.key === "link") requireDocument(safeHref(content.value.href), "UNCLASSIFIED_REFERENCE");
         }
       } else if (content instanceof Y.ContentString) {
         requireDocument(parent instanceof Y.XmlText, "UNSUPPORTED_HISTORY");

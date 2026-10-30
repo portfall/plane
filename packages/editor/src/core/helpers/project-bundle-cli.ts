@@ -20,7 +20,7 @@ const refusal = (code: string) => JSON.stringify({ format: PROJECT_BUNDLE_DOCUME
 
 async function main() {
   if (process.argv.length === 3 && process.argv[2] === "--help") {
-    process.stdout.write(JSON.stringify({ format: PROJECT_BUNDLE_DOCUMENT_FORMAT, support: PROJECT_BUNDLE_DOCUMENT_SUPPORT, usage: "One JSON request on stdin; identity-only. No origin, actor, workspace or asset rewriting. Unknown references/history refuse.", max_document_bytes: PROJECT_BUNDLE_MAX_BYTES, max_input_bytes: MAX_INPUT_BYTES, max_output_bytes: MAX_OUTPUT_BYTES }) + "\n");
+    process.stdout.write(JSON.stringify({ format: PROJECT_BUNDLE_DOCUMENT_FORMAT, support: PROJECT_BUNDLE_DOCUMENT_SUPPORT, usage: "One JSON request on stdin; identity references; external URLs, links and UUIDs in text are retained as literals; anything naming the source origin refuses. No origin, actor, workspace or asset rewriting. Unknown references/history refuse.", max_document_bytes: PROJECT_BUNDLE_MAX_BYTES, max_input_bytes: MAX_INPUT_BYTES, max_output_bytes: MAX_OUTPUT_BYTES }) + "\n");
     return;
   }
   if (process.argv.length !== 2) throw new ProjectBundleDocumentError("INVALID_INPUT");

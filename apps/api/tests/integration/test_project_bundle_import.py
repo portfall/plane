@@ -485,7 +485,7 @@ class CompleteProjectBundleTests(BundleImportFixture):
                 patch("django.db.models.Model.save", side_effect=AssertionError("native save side effect")),
             ):
                 receipt = self.apply()
-            assert receipt["codec_support"] == "identity-only/1"
+            assert receipt["codec_support"] == "identity-literals/2"
             target_page = apps.get_model("db", "Page").all_objects.using("target").values().get(pk=page.pk)
             assert bytes(target_page["description_binary"]) == base64.b64decode(
                 NATIVE_DOCUMENT_FIXTURE["page"]["binary"]
