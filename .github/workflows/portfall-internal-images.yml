@@ -28,38 +28,80 @@ concurrency:
 jobs:
   native-images:
     if: github.repository == 'portfall/plane'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+            node_arch: x64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+            node_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      PLANE_ARCH: ${{ matrix.arch }}
+      PLANE_MACHINE: ${{ matrix.machine }}
+      PLANE_NODE_ARCH: ${{ matrix.node_arch }}
+      # BuildKit v0.34.1, pinned by index digest. Its OCI exporter writes the exact archives
+      # that are loaded, tested, scanned and later published; Docker's own store is not used
+      # as the release source.
+      BUILDKIT_IMAGE: moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Build and test native x86 images without publication
+      - name: Build, load and test native images without publication
         shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = x86_64
+          test "$(uname -m)" = "$PLANE_MACHINE"
           plane_build_tmp=$(mktemp -d)
-          trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_build_tmp"' EXIT
+          trap 'docker buildx rm plane-release >/dev/null 2>&1 || true; python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_build_tmp"' EXIT
           export DOCKER_CONFIG="$plane_build_tmp/docker"
           mkdir -p "$DOCKER_CONFIG"
           printf '{}' > "$DOCKER_CONFIG/config.json"
+          docker buildx create --name plane-release --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" --bootstrap
+          plane_oci="${{ runner.temp }}/plane-oci"
+          mkdir -m 700 "$plane_oci"
+          build() {
+            docker buildx build --builder plane-release --platform "linux/$PLANE_ARCH" \
+              --provenance=false --sbom=false "$@" .
+          }
           for target in live space web admin; do
-            docker build --platform linux/amd64 --target "$target" \
-              -f deployments/portfall/Dockerfile.node -t "local/plane-$target:ci" .
+            build --target "$target" -f deployments/portfall/Dockerfile.node \
+              --output "type=docker,dest=$plane_oci/$target.oci.tar,compression=gzip,oci-mediatypes=true"
           done
-          docker build --platform linux/amd64 --target build \
-            -f deployments/portfall/Dockerfile.node -t local/plane-node-build:ci .
+          build -f deployments/portfall/Dockerfile.api \
+            --output "type=docker,dest=$plane_oci/api.oci.tar,compression=gzip,oci-mediatypes=true"
+          build --target build -f deployments/portfall/Dockerfile.node --load -t local/plane-node-build:ci
+          for role in api live space web admin; do
+            loaded=$(docker load --input "$plane_oci/$role.oci.tar" | sed -n 's/^Loaded image\( ID\)\{0,1\}: //p' | tail -n 1)
+            test -n "$loaded"
+            # The tested image must be the archive's own image: Docker's ID is its config (classic
+            # store) or manifest (containerd store) digest.
+            python3 -I - "$plane_oci/$role.oci.tar" "$(docker image inspect --format '{{.Id}}' "$loaded")" <<'PYIDENTITY'
+          import json, sys, tarfile
+          with tarfile.open(sys.argv[1]) as archive:
+              [descriptor] = json.load(archive.extractfile('index.json'))['manifests']
+              manifest = json.load(archive.extractfile('blobs/sha256/' + descriptor['digest'].removeprefix('sha256:')))
+          assert sys.argv[2] in (descriptor['digest'], manifest['config']['digest']), 'loaded image is not the archived image'
+          PYIDENTITY
+            docker tag "$loaded" "local/plane-$role:ci"
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "local/plane-$role:ci")" = "linux/$PLANE_ARCH"
+          done
           docker run --rm --network none --memory 3g --pids-limit 256 \
             --env API_BASE_URL=http://api.invalid --env LIVE_SERVER_SECRET_KEY=synthetic-ci-only \
             --entrypoint sh local/plane-node-build:ci -c \
             'pnpm --filter live test && pnpm --filter @plane/editor test && node --test deployments/portfall/verify-deploy.test.mjs deployments/portfall/test-generate-node-notices.mjs'
-          docker build --platform linux/amd64 -f deployments/portfall/Dockerfile.api \
-            -t local/plane-api:ci .
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --ulimit core=0 --memory 512m --pids-limit 128 \
-            --tmpfs /tmp:rw,size=64m --entrypoint node local/plane-live:ci --input-type=module -e \
-            'import sharp from "sharp"; if(process.arch!=="x64") throw Error("wrong architecture"); const b=await sharp({create:{width:8,height:8,channels:4,background:"#fff"}}).resize(4,4).png().toBuffer(); const m=await sharp(b).metadata(); if(m.width!==4) throw Error("native image conversion failed"); console.log(JSON.stringify({node:process.version,arch:process.arch,sharp:sharp.versions.sharp,libvips:sharp.versions.vips,uid:process.getuid()}))'
+            --env PLANE_NODE_ARCH --tmpfs /tmp:rw,size=64m --entrypoint node local/plane-live:ci --input-type=module -e \
+            'import sharp from "sharp"; if(process.arch!==process.env.PLANE_NODE_ARCH) throw Error("wrong architecture"); const b=await sharp({create:{width:8,height:8,channels:4,background:"#fff"}}).resize(4,4).png().toBuffer(); const m=await sharp(b).metadata(); if(m.width!==4) throw Error("native image conversion failed"); console.log(JSON.stringify({node:process.version,arch:process.arch,sharp:sharp.versions.sharp,libvips:sharp.versions.vips,uid:process.getuid()}))'
           docker run --rm --network none --read-only --cap-drop ALL \
             --security-opt no-new-privileges --ulimit core=0 --memory 256m --pids-limit 128 \
             --entrypoint node local/plane-space:ci -e \
@@ -77,24 +119,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = x86_64
+          test "$(uname -m)" = "$PLANE_MACHINE"
           plane_scan_tmp=$(mktemp -d)
           trap 'python3 -c "import shutil,sys; shutil.rmtree(sys.argv[1])" "$plane_scan_tmp"' EXIT
           plane_inventory="${{ runner.temp }}/plane-native-inventory"
           mkdir -m 700 "$plane_inventory"
           curl --fail --silent --show-error --location --max-time 120 \
-            https://github.com/anchore/syft/releases/download/v1.55.0/syft_1.55.0_linux_amd64.tar.gz \
+            https://github.com/anchore/syft/releases/download/v1.55.0/syft_1.55.0_linux_${PLANE_ARCH}.tar.gz \
             -o "$plane_scan_tmp/syft.tar.gz"
-          printf '%s  %s\n' bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d "$plane_scan_tmp/syft.tar.gz" | sha256sum -c -
+          case "$PLANE_ARCH" in
+            amd64) syft_archive=bb65249542db5fedeeb4d3f9b018b75e7264dbfbbb10486f044581a92f90490d syft_binary=64c9631c3560336c55c549df0de08cd577d02399c9de807ac390960a4ed5c351 ;;
+            arm64) syft_archive=929bd163db2d7cd2255d3bcb8967208079813d7b46b0c952f7b794d8e2c7d304 syft_binary=4f8068b25551a42991a292a42078519fdc739a97a6f6310e1dcf1367a258c1c2 ;;
+          esac
+          printf '%s  %s\n' "$syft_archive" "$plane_scan_tmp/syft.tar.gz" | sha256sum -c -
           tar -xzf "$plane_scan_tmp/syft.tar.gz" -C "$plane_scan_tmp" syft LICENSE
-          printf '%s  %s\n' 64c9631c3560336c55c549df0de08cd577d02399c9de807ac390960a4ed5c351 "$plane_scan_tmp/syft" | sha256sum -c -
+          printf '%s  %s\n' "$syft_binary" "$plane_scan_tmp/syft" | sha256sum -c -
           cp "$plane_scan_tmp/LICENSE" "$plane_inventory/scanner-LICENSE"
           mkdir -m 700 "$plane_scan_tmp/home" "$plane_scan_tmp/docker" "$plane_scan_tmp/cache"
           printf '{}' > "$plane_scan_tmp/docker/config.json"
           printf 'check-for-app-update: false\nlicense:\n  content: all\npackage:\n  search-indexed-archives: false\n  search-unindexed-archives: false\n' > "$plane_scan_tmp/syft.yaml"
           for role in api live space web admin; do
             image="local/plane-$role:ci"
-            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "linux/$PLANE_ARCH"
             image_id=$(docker image inspect --format '{{.Id}}' "$image")
             docker image inspect "$image" > "$plane_inventory/$role-image.json"
             for notice_file in THIRD_PARTY_NOTICES node-notices.json; do
@@ -139,7 +185,7 @@ jobs:
               -o "syft-json=$plane_inventory/$role.syft.json"
             python3 -c 'import pathlib,sys; pathlib.Path(sys.argv[1]).unlink()' "$plane_scan_tmp/image.tar"
           done
-          python3 -I - "$plane_inventory" "$GITHUB_SHA" <<'PYRECEIPT'
+          python3 -I - "$plane_inventory" "$GITHUB_SHA" "linux/$PLANE_ARCH" "${{ runner.temp }}/plane-oci" <<'PYRECEIPT'
           from collections import Counter
           from pathlib import Path
           import hashlib, json, sys
@@ -182,7 +228,8 @@ jobs:
                   assert node_license in notices
           files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.iterdir())}
           (root / 'collection.json').write_text(json.dumps({
-              'source_commit': sys.argv[2], 'platform': 'linux/amd64',
+              'source_commit': sys.argv[2], 'platform': sys.argv[3],
+              'oci_archives': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(sys.argv[4]).iterdir())},
               'scanner_version': '1.55.0', 'files': files,
               'registry_publication': False, 'license_approved': False,
               'source_fulfillment_complete': False,
@@ -192,7 +239,77 @@ jobs:
       - name: Retain metadata inventories for operator review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: plane-native-amd64-inventory-${{ github.sha }}
+          name: plane-native-${{ matrix.arch }}-inventory-${{ github.sha }}
           path: ${{ runner.temp }}/plane-native-inventory
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
+      - name: Retain the tested OCI archives for the release index
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: plane-native-${{ matrix.arch }}-oci-${{ github.sha }}
+          path: ${{ runner.temp }}/plane-oci
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+  release-index:
+    # Only refs pushed to this repository produce attested release layouts. Nothing is pushed to
+    # a registry here: the founder's publisher verifies these attestations and pushes the layouts.
+    if: github.repository == 'portfall/plane' && github.event_name != 'pull_request'
+    needs: native-images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: plane-native-*-${{ github.sha }}
+          path: ${{ runner.temp }}/plane-native
+      - name: Assemble multi-platform release layouts from the tested archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          native="${{ runner.temp }}/plane-native"
+          for arch in amd64 arm64; do
+            python3 -I - "$native/plane-native-$arch-inventory-$GITHUB_SHA/collection.json" "$native/plane-native-$arch-oci-$GITHUB_SHA" "linux/$arch" "$GITHUB_SHA" <<'PYCHECK'
+          import hashlib, json, sys
+          from pathlib import Path
+          collection = json.loads(Path(sys.argv[1]).read_text())
+          assert collection['source_commit'] == sys.argv[4] and collection['platform'] == sys.argv[3]
+          actual = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path(sys.argv[2]).iterdir())}
+          assert actual == collection['oci_archives'], 'downloaded archives differ from the tested ones'
+          PYCHECK
+          done
+          args=()
+          for role in api live space web admin; do
+            name=$role; test "$role" != api || name=backend
+            args+=("$name=$native/plane-native-amd64-oci-$GITHUB_SHA/$role.oci.tar,$native/plane-native-arm64-oci-$GITHUB_SHA/$role.oci.tar")
+          done
+          python3 -I deployments/portfall/oci-release-index.py "$GITHUB_SHA" "${{ runner.temp }}/plane-release" "${args[@]}"
+          for arch in amd64 arm64; do
+            cp "$native/plane-native-$arch-inventory-$GITHUB_SHA/collection.json" "${{ runner.temp }}/plane-release/collection-$arch.json"
+          done
+          cat "${{ runner.temp }}/plane-release/release.json"
+      - name: Attest the release layouts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-path: |
+            ${{ runner.temp }}/plane-release/*.oci.tar
+            ${{ runner.temp }}/plane-release/release.json
+      - name: Attest the image index digests
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
+        with:
+          subject-checksums: ${{ runner.temp }}/plane-release/index-digests.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: plane-release-${{ github.sha }}
+          path: ${{ runner.temp }}/plane-release
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0

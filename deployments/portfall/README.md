@@ -128,14 +128,25 @@ corresponding to each deployed image; neither historical commit alone describes
 this combined build.
 
 
-## Native CI artifact inventory
+## Native CI artifact inventory and release layouts
 
-The internal image workflow retains actual AMD64 CycloneDX/native Syft reports,
-image-config metadata and a source-bound checksum receipt for operator review.
-It uses the separately reviewed, checksum-pinned Syft 1.55.0 operator binary;
-only archive data is scanned and no image or registry credential is published.
-The retained metadata is not an image release, license decision, signature or
-corresponding-source clearance.
+The internal image workflow builds each role natively on GitHub's AMD64 and ARM64
+runners with a digest-pinned BuildKit. Each build writes one archive that is both
+a Docker-loadable tar and an OCI layout with OCI media types. That exact archive
+is loaded, checked to be the archived image (config or manifest digest), tested
+and scanned; Docker's local store is never the release source. Each platform
+retains CycloneDX/native Syft reports from the checksum-pinned Syft 1.55.0
+binary, image metadata, notices and a receipt binding the archive hashes.
+
+On a push, `release-index` re-checks the downloaded archives against both
+receipts, then `oci-release-index.py` hash-checks every blob and assembles one
+multi-platform index per role (`backend`, `live`, `space`, `web`, `admin`). The
+layouts, `release.json` and each index digest receive GitHub build-provenance
+attestations (Sigstore) bound to this repository, workflow and commit. A registry
+push of a layout preserves its child manifest and index digests, so the digest in
+`release.json` is the deployable digest. Nothing here pushes to a registry, signs
+as Portfall or approves licenses: the operator's publisher verifies these
+attestations before publishing, and the review records stay separate.
 
 ## JavaScript and codec notices
 
