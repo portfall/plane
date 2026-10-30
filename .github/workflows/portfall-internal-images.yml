@@ -293,7 +293,12 @@ jobs:
           done
           python3 -I deployments/portfall/oci-release-index.py "$GITHUB_SHA" "${{ runner.temp }}/plane-release" "${args[@]}"
           for arch in amd64 arm64; do
-            cp "$native/plane-native-$arch-inventory-$GITHUB_SHA/collection.json" "${{ runner.temp }}/plane-release/collection-$arch.json"
+            inventory="$native/plane-native-$arch-inventory-$GITHUB_SHA"
+            cp "$inventory/collection.json" "${{ runner.temp }}/plane-release/collection-$arch.json"
+            for role in api live space web admin; do
+              name=$role; test "$role" != api || name=backend
+              cp "$inventory/$role.cdx.json" "${{ runner.temp }}/plane-release/$name-$arch.cdx.json"
+            done
           done
           cat "${{ runner.temp }}/plane-release/release.json"
       - name: Attest the release layouts
@@ -301,6 +306,8 @@ jobs:
         with:
           subject-path: |
             ${{ runner.temp }}/plane-release/*.oci.tar
+            ${{ runner.temp }}/plane-release/*.cdx.json
+            ${{ runner.temp }}/plane-release/collection-*.json
             ${{ runner.temp }}/plane-release/release.json
       - name: Attest the image index digests
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8

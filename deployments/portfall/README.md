@@ -141,8 +141,8 @@ binary, image metadata, notices and a receipt binding the archive hashes.
 On a push, `release-index` re-checks the downloaded archives against both
 receipts, then `oci-release-index.py` hash-checks every blob and assembles one
 multi-platform index per role (`backend`, `live`, `space`, `web`, `admin`). The
-layouts, `release.json` and each index digest receive GitHub build-provenance
-attestations (Sigstore) bound to this repository, workflow and commit. A registry
+layouts, `release.json`, both platform receipts, each child's CycloneDX SBOM
+and each index digest receive GitHub build-provenance attestations (Sigstore) bound to this repository, workflow and commit. A registry
 push of a layout preserves its child manifest and index digests, so the digest in
 `release.json` is the deployable digest. Nothing here pushes to a registry, signs
 as Portfall or approves licenses: the operator's publisher verifies these
